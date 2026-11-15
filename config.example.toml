@@ -1,0 +1,40 @@
+# mattertui config — copy to ~/.config/mattertui/config.toml
+#
+# Rooms and devices appear in the order they are declared; the dashboard
+# lays them out automatically. Pair a device with:
+#   mattertui pair <device-id> <setup-code>
+
+[ui]
+temperature_unit = "celsius"   # celsius | fahrenheit
+motion = true                  # false = no ambient animation
+history_hours = 24             # in-memory graph window (1–168)
+
+[log]
+panel = "hidden"               # hidden | open — toggle with `
+height = 8
+filter = "info,mdns_sd=warn"   # tracing EnvFilter syntax; RUST_LOG overrides
+
+[[room]]
+id = "living-room"
+name = "Living room"
+icon = "sofa"
+
+[[room]]
+id = "bedroom"
+name = "Bedroom"
+icon = "bed"
+
+[[device]]
+id = "living-room-lamp"        # also the pairing label: a-z, 0-9, -
+name = "Lamp"
+room = "living-room"
+kind = "plug"                  # plug | thermostat | temperature_sensor
+icon = "lamp"
+
+[[device]]
+id = "bedroom-temp"
+name = "Bedside"
+room = "bedroom"
+kind = "temperature_sensor"
+# endpoint = 1                 # optional; auto-detected
+# featured = true              # bigger tile with a chart

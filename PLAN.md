@@ -1,0 +1,442 @@
+# mattertui — plan
+
+A read-only terminal dashboard for the Matter devices on my network: smart plugs,
+thermostats and battery temperature sensors. Some are on Wi-Fi and some are on Thread
+behind a HomePod mini border router. Devices are grouped into rooms and laid out
+automatically, with live graphs and lots of colour and movement.
+
+**One binary, no daemon.** Running `mattertui` shows the dashboard. A few
+subcommands handle one-off jobs (§9). macOS and Linux (Raspberry Pi in tmux)
+behave the same way, with no platform-specific code paths. There's no
+database: pairings are saved (§2), and graph history is in memory only.
+
+**Core crates:** `ratatui`, `matter-controller` 0.18.3, `tokio`, `anyhow`.
+
+---
+
+## 1. Pairing (a setup code is the only input)
+
+The devices stay in Apple Home. mattertui joins each one as a **second controller**
+using Matter's Multi-Admin feature.
+
+1. In the Home app, open the device and go to Settings → **Turn On Pairing Mode**.
+   Copy the 11-digit code.
+2. In mattertui, select the device's tile (shown as *unpaired*), press `p` and
+   enter the code. Both forms are accepted:
+   - the manual code, e.g. `3497-011-2332`, with any dashes or spaces
+   - a QR payload, `MT:…`
+
+   The check digit is validated as you type.
+3. The app runs `controller.commission(code, Some(device_id))` over IP; no BLE is
+   needed. Thread devices are reached through the HomePod. `commission()` is a
+   single call with no progress callbacks, so the modal shows a spinner. The
+   library's own `tracing` output streams into the log panel as it goes.
+4. It then sets the fabric label to `"mattertui"`, so it's easy to spot in Home →
+   Connected Services. If the device supports the ICD check-in protocol, it also
+   registers for check-ins (§5).
+
+The commissioning `label` is the config's **device id**. That's the only link
+between config and controller state, so the config never contains node IDs.
+
+**Pairing happens once.** The result is saved (§2). On the next launch the app
+reconnects to every paired device without asking for a code. Pairing from the
+CLI works the same way: `mattertui pair <device-id> <code>`.
+
+**Unpair:** select the tile and press `U`, or run `mattertui unpair <device-id>`.
+This removes our fabric from the device, then calls `forget_node`. If the device
+can't be reached, the app only forgets it locally.
+
+**Read-only:** device workers get a `ReadOnlyNode` wrapper that only exposes
+`read` and `subscribe`. Only `pairing.rs` can commission, register ICD clients or
+remove fabrics.
+
+**Attestation roots:** retail devices need the production PAA and CD certificates
+from connectedhomeip. `mattertui fetch-roots` downloads them into the data
+directory. It uses the GitHub contents API to list
+`credentials/production/{paa-root-certs,cd-certs}`, then fetches each `.der`
+file. Re-running it picks up new vendors. If the roots are missing, the pairing
+modal tells you to run it.
+
+---
+
+## 2. Configuration
+
+### Where things live (the same on macOS and Linux)
+
+| What | Path | Who writes it |
+|---|---|---|
+| Config | `$XDG_CONFIG_HOME/mattertui/config.toml` (default `~/.config/…`); `--config` overrides | you |
+| Pairing state | `$XDG_DATA_HOME/mattertui/controller.bin` (default `~/.local/share/…`) | matter-controller's `FileStore` |
+| Attestation roots | `$XDG_DATA_HOME/mattertui/roots/{paa,cd}/` | `mattertui fetch-roots` |
+
+XDG paths are used on macOS too, not `~/Library/Application Support`, so both
+platforms behave the same. This is about 10 lines of our own code, so it needs no
+paths crate.
+
+### What `controller.bin` holds
+
+It's the library's own snapshot format, verified in the crate source:
+
+- the fabric's root certificate and key
+- our controller's operational identity (NOC and key)
+- the IPK
+- for each paired device:
+  - node id
+  - public key
+  - **label** (= config device id)
+  - vendor/product id
+  - last known address
+  - CASE resumption record, for fast reconnects
+- ICD check-in registrations
+
+Saves are atomic (temp file then rename) and the file mode is `0600`. **It holds
+private keys in the clear.** Anyone who copies it can act as this controller on
+your devices. The data dir is created as `0700`. Back the file up if you don't
+want to re-pair after a disk loss. Copying it from the Mac to the Pi moves every
+pairing across, as long as only one machine runs at a time.
+
+### Config
+
+The config holds **no coordinates**. Rooms and devices appear in the order they're
+declared, and the layout engine does the rest.
+
+```toml
+[ui]
+temperature_unit = "celsius"   # celsius | fahrenheit
+motion = true                  # false = no ambient animation
+history_hours = 24             # in-memory graph window
+
+[log]
+panel = "hidden"               # hidden | open — state at startup; toggle with `
+height = 8                     # lines when open
+filter = "info,mdns_sd=warn"   # tracing EnvFilter syntax; RUST_LOG overrides
+
+[[room]]
+id = "lounge"
+name = "Lounge"
+icon = "sofa"
+accent = "amber"               # optional; assigned from the palette otherwise
+
+[[room]]
+id = "bedroom"
+name = "Bedroom"
+icon = "bed"
+
+[[device]]
+id = "lounge-lamp"             # stable key = commissioning label
+name = "Floor lamp"
+room = "lounge"
+kind = "plug"                  # plug | thermostat | temperature_sensor
+icon = "lamp"
+
+[[device]]
+id = "hall-thermostat"
+name = "Heating"
+room = "lounge"
+kind = "thermostat"
+featured = true                # large tile with big readout and chart
+
+[[device]]
+id = "bedroom-temp"
+name = "Bedside"
+room = "bedroom"
+kind = "temperature_sensor"
+```
+
+**Validation on startup** (also available as `mattertui check`): problems are
+printed and the app exits before the TUI starts. Errors include line and column numbers. These are checked:
+- duplicate ids, or ids with characters outside `[a-z0-9-]`
+- a `room`, `kind` or `icon` that doesn't exist
+
+Paired nodes with no matching config entry show in an "Unassigned" panel, with
+their node id and vendor/product, so you can add them to the config.
+
+---
+
+## 3. What each kind reads
+
+There is **one subscription per device**. On every startup the app reads
+Descriptor (0x001D) to find the right endpoint. That's a single read, so
+nothing is cached.
+
+| Kind | Device type | Metrics |
+|---|---|---|
+| plug | 0x010A (or 0x0100) | `on` from OnOff 0x0006/0x0000 |
+| thermostat | 0x0301 | from Thermostat 0x0201:<br>• `temperature` LocalTemperature 0x0000<br>• `heat_setpoint` 0x0012<br>• `cool_setpoint` 0x0011<br>• `mode` SystemMode 0x001C<br>• `running` ThermostatRunningState 0x0029 |
+| temperature_sensor | 0x0302 | • `temperature` from 0x0402/0x0000<br>• `humidity` from 0x0405/0x0000, if present |
+| any | — | • `battery` from Power Source 0x002F/0x000C<br>• Wi-Fi/Thread badge from Network Commissioning 0x0031 FeatureMap<br>• vendor, product and firmware from Basic Information 0x0028 |
+
+Temperatures are int16 values in units of 0.01 °C and may be null. Decoding is
+unit-tested against captured values.
+
+---
+
+## 4. In-memory history
+
+Each graphed metric (temperature, humidity, setpoint, `on`, `running`) gets a
+fixed-size ring buffer of **1-minute buckets**, each holding min, max and last
+value. With `history_hours = 24` that's 1,440 buckets per metric, which is a few
+KB per device. The buffers start empty at launch and are lost when the app quits.
+
+Charts offer `15m · 1h · 6h · 24h`, capped at how long the app has been running.
+
+---
+
+## 5. Battery sensors (ICDs)
+
+Battery Thread sensors are *Intermittently Connected Devices*: they sleep most of
+the time. Most temperature sensors are the **short idle time** (SIT) kind, where
+a normal subscription works; the device just negotiates a long `max_interval`.
+
+- **Staleness:** a tile only goes stale after the device's negotiated
+  `max_interval` plus a grace period, never a fixed timeout. Until then it shows
+  *sleeping · last report 6m ago*.
+- **Long idle time (LIT) devices** may drop the subscription while asleep. At
+  pairing, if `IcdManagement` (0x0046) FeatureMap reports the Check-In Protocol,
+  the app registers as a check-in client.
+- **Check-in listener:** a background task loops on
+  `listen_for_checkin_once(port)`. Each check-in triggers
+  `resubscribe_now(node_id)`.
+- **This is the main unknown.** The listener advertises from a second mDNS
+  responder, so milestone 1 tests it on real hardware on both OSes. If the
+  sensors turn out to be SIT, the listener is a no-op we can leave out.
+
+---
+
+## 6. Auto-layout
+
+Layout is a pure function:
+`layout(rooms, devices, area) -> Vec<(Id, Rect, Variant)>`.
+It's snapshot-tested at several terminal sizes.
+
+1. **Tile size from kind:**
+
+   | Kind | Compact (1 line) | Normal | Featured |
+   |---|---|---|---|
+   | plug | yes | 3 lines with on-timeline | 3 lines with on-timeline |
+   | sensor | yes | 4 lines with sparkline | big readout and chart |
+   | thermostat | yes | 5 lines | big readout, setpoint gauge, chart with heating bands |
+
+2. **Room panel:** a header with name, icon and summary (average temperature,
+   "2/3 lights on"), with tiles flowing in 1–2 columns depending on width.
+3. **Masonry packing:** column count is `width / min_room_width`. Each room goes,
+   in declaration order, into the shortest column.
+4. **Fitting:** if it doesn't fit, featured tiles become normal, then normal tiles
+   become compact, then the view scrolls.
+
+On resize the layout is recomputed and tiles animate to their new positions.
+
+---
+
+## 7. Look and movement
+
+**Colour**
+- One dark truecolor palette, with a 16-colour fallback.
+- Each room has an accent colour for its border, title and chart lines.
+- Temperatures use a 5-stop gradient (blue → teal → green → amber → red). It
+  applies to numbers, sparklines and chart lines. This is a small hand-written
+  interpolation, not a crate.
+
+**Movement** (from `tachyonfx`, plus our own value tweens)
+- **Startup:** rooms sweep in one after another, and values count up.
+- **Updates:** values tween to the new number and the tile edge glows briefly.
+- **Plugs:** the lamp glyph warms up through amber when it turns on, and fades
+  when it turns off.
+- **Heating:** a flickering flame glyph, and shimmer along the heating band in
+  the chart.
+- **Connecting:** a spinner and a scanning border. A device going offline
+  dissolves to dim.
+- **Pairing success:** the tile coalesces into place.
+
+**Chrome**
+- **Top bar:** title, devices live/total, lights on, clock.
+- **Bottom ticker:** recent events, e.g. "Lounge lamp on · 2m" or
+  "Bedroom 18.4° ↓".
+
+**Log panel** (toggle with `` ` ``; startup state comes from `[log] panel`)
+- **Placement:** docked at the bottom, `[log] height` lines tall. When it's open,
+  the layout engine gets less height and reflows the rooms. The panel slides
+  in and out.
+- **Content:** a live stream of `tracing` events from the app and from
+  `matter-controller`: commissioning steps, subscription status,
+  resubscribes, ICD check-ins and errors.
+- **Line format:** `HH:MM:SS LEVEL target message`.
+  - Levels are coloured: ERROR red, WARN amber, INFO cyan, DEBUG/TRACE dim.
+  - When a line carries a `device` field, the device name is shown in its
+    room's accent colour.
+  - New lines briefly highlight.
+- **Scrolling:** it follows the newest line by default. `Tab` focuses the panel.
+  Then `↑↓` / `PgUp` / `PgDn` scroll and pause following, and `End` resumes it.
+- **Alerts while hidden:** if a WARN or ERROR arrives while the panel is hidden,
+  a badge appears in the top bar (e.g. `⚠ 2`) so problems don't go unnoticed.
+  Opening the panel clears it.
+
+**Detail view (`Enter`):** a large braille chart with a range switcher, plus
+min/avg/max, vendor, product, firmware, transport, node id and subscription
+health.
+
+**Performance:** frames are only drawn while something is animating or has
+changed, at up to 30 fps. When idle the app does no drawing.
+
+**Fallback:** the same code runs on both platforms.
+- Icons are Unicode symbols (`◉ ☼ ♨ ❄ ⌂`), not nerdfont or emoji. They have
+  consistent widths in tmux and need no special font.
+- If `TERM=linux` (the bare console), the app uses ASCII icons and block charts.
+- If `COLORTERM` isn't `truecolor`/`24bit`, it uses the 16-colour palette.
+
+**Keys**
+
+| Key | Action |
+|---|---|
+| arrows / `hjkl` | move between tiles |
+| `Enter` | device detail |
+| `[` `]` | change chart range |
+| `p` | pair |
+| `U` | unpair |
+| `m` | toggle motion |
+| `` ` `` | toggle log panel |
+| `Tab` | focus the log panel (when open) |
+| `?` | help |
+| `q` | quit |
+
+---
+
+## 8. Architecture
+
+```
+main ─► load+validate config ─► build MatterController ─► spawn tasks ─► run TUI
+
+tasks ── DeviceWorker × N : subscribe → decode → AppEvent::Update ──┐
+      ── IcdListener      : check-in → resubscribe_now               │ mpsc
+      ── Pairing (on demand): commission → label → ICD reg ──────────┤
+                                                                      ▼
+App loop: select!{ terminal events, AppEvent, frame tick (only while animating) }
+          state: devices + history rings  →  layout()  →  widgets + effects  →  draw
+```
+
+The TUI owns all state. Workers only send `AppEvent`s, and there is no protocol
+layer.
+
+### Logging (no file)
+
+Logs go to stderr or to a panel, never to a file.
+
+- **Dashboard:** a small custom `tracing_subscriber::Layer` (`logbuf.rs`, about
+  60 lines) formats each event into a styled line.
+  - Lines go into a bounded ring buffer (1,000 lines), shared as
+    `Arc<Mutex<VecDeque<LogLine>>>`.
+  - Each new line also sends `AppEvent::Log`, so the panel redraws only when
+    something arrives.
+  - It's hand-rolled rather than `tui-logger`, so the lines get the same
+    styling and colours as the rest of the dashboard.
+- **Subcommands** (`pair`, `check`, …): a plain `fmt` layer writes to stderr.
+- **On exit or panic:** a panic hook restores the terminal first. If the app
+  exits with an error or panics, it then prints the last 50 buffered lines to
+  stderr, so the context isn't lost when the TUI closes.
+- **Filter:** `[log] filter` uses `EnvFilter` syntax, and `RUST_LOG` overrides
+  it.
+
+**DeviceWorker** maps subscription events like this:
+
+| Event | Action |
+|---|---|
+| `Report` | update the value and its history |
+| `Established` | mark live; store `max_interval` |
+| `Resubscribing` | mark reconnecting |
+| `Lagged` | re-read everything |
+
+If the first subscribe fails, it retries with backoff from 1 s up to 5 min.
+
+**Single instance:** the library allows only one process per controller identity.
+A second `mattertui` would cancel the first one's subscriptions. So every
+command that opens the controller (the dashboard, `pair`, `unpair`) takes a
+`std::fs::File::try_lock` on `controller.lock`. That API is stable since Rust 1.89,
+which matter-controller already requires. If the lock is held, the command exits
+with an "already running" message; for `pair` it adds "press `p` in the dashboard instead".
+
+### Subcommands (`clap`)
+
+| Command | Does |
+|---|---|
+| `mattertui` | dashboard |
+| `mattertui pair <device-id> <code>` | commission one device from the CLI (same code path as `p`) |
+| `mattertui unpair <device-id>` | remove our fabric from the device and forget it |
+| `mattertui nodes` | list paired nodes: label, node id, vendor/product, and whether a config entry matches |
+| `mattertui check` | validate the config and exit |
+| `mattertui fetch-roots` | download the PAA/CD attestation roots |
+
+Every command accepts `--config <path>`.
+
+```
+src/
+  main.rs         clap subcommands, startup, terminal setup/restore
+  paths.rs        XDG dirs, 0700 data dir, instance lock
+  config.rs       types, validation
+  roots.rs        fetch-roots (GitHub contents API → .der files)
+  matter/
+    mod.rs        controller bootstrap, clock check
+    readonly.rs   ReadOnlyNode
+    probe.rs      endpoint detection
+    worker.rs     subscription loop
+    decode.rs     Value → metrics
+    icd.rs        check-in listener
+    pairing.rs    commission, label, ICD registration, unpair
+  state.rs        DeviceState, History ring
+  ui/
+    app.rs        event loop, keys
+    layout.rs     auto-layout
+    theme.rs      palette, gradient, capability detection
+    anim.rs       tweens + tachyonfx registry
+    logbuf.rs     tracing Layer → ring buffer + AppEvent::Log
+    widgets/      room, tile_plug, tile_sensor, tile_thermostat, chart, ticker, top_bar, log_panel, pair_modal, detail
+```
+
+**Crates**
+
+| Crate | Why |
+|---|---|
+| `ratatui`, `crossterm` (`event-stream`) | TUI |
+| `tokio`, `futures` | runtime and `EventStream` |
+| `anyhow` | errors |
+| `matter-controller` | Matter |
+| `serde`, `toml` | config |
+| `clap` (derive) | subcommands |
+| `ureq` (rustls), `serde_json` | `fetch-roots` only; blocking, so no async HTTP stack |
+| `tachyonfx` | effects |
+| `tui-big-text` | big readouts |
+| `tracing`, `tracing-subscriber` (`env-filter`) | in-app log panel; stderr for subcommands |
+| `insta` (dev) | layout and widget snapshot tests |
+
+---
+
+## 9. Network prerequisites
+
+The app code is identical on both platforms. Only OS-level network setup differs.
+
+- **Thread routing:** the host needs the IPv6 route the HomePod advertises.
+  - macOS accepts it automatically.
+  - Linux needs `net.ipv6.conf.wlan0.accept_ra_rt_info_max_plen=64` (persist it
+    in `/etc/sysctl.d/`). Check with `ip -6 route | grep fd`.
+- **Clock:** the Pi has no RTC. If the clock isn't set yet, the app shows
+  "waiting for clock sync" instead of failing commissioning.
+- **mDNS:** the library's pure-Rust responder works alongside both Bonjour and
+  avahi.
+- **Matter uses IPv6.** Use `ping -6` against the addresses from
+  `avahi-browse -r`.
+
+---
+
+## 10. Milestones
+
+1. **Spike** (on the Mac and then the Pi):
+   - Build the real `paths`, `fetch-roots`, `pair` and `nodes` subcommands.
+   - Pair one Wi-Fi plug and one battery Thread sensor, then **restart and
+     confirm both reconnect with no code**.
+   - Read values and check the sensor's ICD type. If it's LIT, receive one
+     check-in.
+2. **Engine without UI:** config and `check`, workers, decoding, history,
+   `unpair`, single-instance lock. Readings are logged to stderr.
+3. **Static dashboard:** log panel (first, so the rest can be debugged in it), layout and snapshot tests, rooms, tiles, detail chart,
+   theme and fallback.
+4. **Pairing and unpairing in the TUI**, plus the ICD listener if needed.
+5. **Motion:** frame clock, tweens, effects, ticker.
