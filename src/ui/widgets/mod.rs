@@ -3,6 +3,7 @@
 
 pub mod chrome;
 pub mod detail;
+pub mod modal;
 pub mod room;
 pub mod tile;
 
@@ -46,7 +47,7 @@ pub fn health_badge(app: &App, h: Health) -> Option<(&'static str, Color)> {
         Health::Unpaired => ("not paired", t.dim()),
         Health::Connecting => ("connecting…", t.dim()),
         Health::Stale => ("stale", t.warn()),
-        Health::Reconnecting => ("reconnecting…", t.warn()),
+        Health::Reconnecting => ("↻", t.faint()),
         Health::Offline => ("offline", t.bad()),
     })
 }

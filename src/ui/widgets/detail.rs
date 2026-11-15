@@ -74,7 +74,10 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     let health = app.health(i);
     let mut status = match health_badge(app, health) {
         None => vec![Span::styled("● live", Style::new().fg(t.good()))],
-        Some((text, c)) => vec![Span::styled(format!("● {text}"), Style::new().fg(c))],
+        Some((text, c)) => {
+            let text = if health == crate::ui::app::Health::Reconnecting { "reconnecting" } else { text };
+            vec![Span::styled(format!("● {text}"), Style::new().fg(c))]
+        }
     };
     match &d.status {
         Status::Live { max_interval_s } => {

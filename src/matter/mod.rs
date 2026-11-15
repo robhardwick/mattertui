@@ -27,15 +27,20 @@ const COMMISSIONER_NODE_ID: u64 = 1;
 /// (e.g. a Raspberry Pi with no RTC before NTP sync).
 const SANE_CLOCK_UNIX: u64 = 1_704_067_200;
 
+#[derive(Clone)]
 pub struct Controller {
     pub inner: MatterController,
     pub commissioner_node_id: u64,
+    /// Attestation roots were loaded, so `commission` can work.
+    pub can_commission: bool,
 }
 
 /// Whether to load attestation roots (only needed for commissioning).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Trust {
     Required,
+    /// Load roots if present (the dashboard: pairing works once they are).
+    IfAvailable,
     NotNeeded,
 }
 
@@ -48,8 +53,20 @@ pub async fn open(paths: &Paths, trust: Trust) -> Result<Controller> {
 
     let store = Arc::new(FileStore::new(paths.store()));
     let mut builder = MatterController::builder(store);
-    if trust == Trust::Required {
-        builder = builder.attestation_trust(load_trust(paths)?);
+    let mut can_commission = false;
+    match trust {
+        Trust::Required => {
+            builder = builder.attestation_trust(load_trust(paths)?);
+            can_commission = true;
+        }
+        Trust::IfAvailable => match load_trust(paths) {
+            Ok(t) => {
+                builder = builder.attestation_trust(t);
+                can_commission = true;
+            }
+            Err(e) => tracing::info!("pairing unavailable: {e:#}"),
+        },
+        Trust::NotNeeded => {}
     }
     let controller = builder.build().await.context("opening Matter controller")?;
 
@@ -79,6 +96,7 @@ pub async fn open(paths: &Paths, trust: Trust) -> Result<Controller> {
     Ok(Controller {
         inner: controller,
         commissioner_node_id,
+        can_commission,
     })
 }
 
@@ -100,6 +118,11 @@ fn load_trust(paths: &Paths) -> Result<AttestationTrust> {
 
 /// Commissioning and CASE need a real wall clock. Wait (with a log line)
 /// rather than fail if it is not set yet.
+/// False on a host whose clock hasn't been set yet (Pi before NTP).
+pub fn clock_is_sane() -> bool {
+    unix_now() >= SANE_CLOCK_UNIX
+}
+
 async fn wait_for_sane_clock() {
     let mut warned = false;
     while unix_now() < SANE_CLOCK_UNIX {

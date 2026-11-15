@@ -1,7 +1,7 @@
 //! UI state and input handling. Rendering lives in `widgets`.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
@@ -49,6 +49,41 @@ pub struct App {
     /// Most recent layout, in dashboard-content coordinates.
     pub layout: Layout,
     pub quit: bool,
+    /// Pair/unpair dialog, if open.
+    pub modal: Option<Modal>,
+    /// Work for the event loop to start (it owns the controller).
+    pub action: Option<Action>,
+    /// Attestation roots are loaded, so pairing can work.
+    pub can_pair: bool,
+}
+
+#[derive(Debug)]
+pub struct Modal {
+    pub kind: ModalKind,
+    pub device: usize,
+    /// Code being typed (pairing only).
+    pub input: String,
+    pub phase: Phase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalKind {
+    Pair,
+    Unpair,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Phase {
+    /// Typing a code / confirming. `error` is from the last attempt.
+    Input { error: Option<String> },
+    Working { since: Instant },
+    Done { ok: bool, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    Pair { device: usize, code: String },
+    Unpair { device: usize },
 }
 
 impl App {
@@ -92,6 +127,9 @@ impl App {
             scroll: 0,
             layout: Layout::default(),
             quit: false,
+            modal: None,
+            action: None,
+            can_pair: false,
         }
     }
 
@@ -159,10 +197,117 @@ impl App {
     pub fn on_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Device { id, update } => {
-                if let Some(i) = self.config.devices.iter().position(|d| d.id.get_ref() == &id) {
+                if let Some(i) = self.device_index(&id) {
                     self.devices[i].apply(update);
                 }
             }
+            AppEvent::Paired { id, result } => {
+                let Some(i) = self.device_index(&id) else { return };
+                let (ok, message) = match result {
+                    Ok(node_id) => {
+                        self.devices[i].apply(crate::state::DeviceUpdate::Status(Status::Connecting));
+                        (true, format!("Paired as node 0x{node_id:X}. Connecting…"))
+                    }
+                    Err(e) => (false, e),
+                };
+                self.finish_modal(i, ModalKind::Pair, ok, message);
+            }
+            AppEvent::Unpaired { id, result } => {
+                let Some(i) = self.device_index(&id) else { return };
+                let (ok, message) = match result {
+                    Ok(note) => {
+                        self.devices[i] = DeviceState::new(self.config.ui.history_hours);
+                        (true, note)
+                    }
+                    Err(e) => (false, e),
+                };
+                self.finish_modal(i, ModalKind::Unpair, ok, message);
+            }
+        }
+    }
+
+    fn device_index(&self, id: &str) -> Option<usize> {
+        self.config.devices.iter().position(|d| d.id.get_ref() == id)
+    }
+
+    fn finish_modal(&mut self, device: usize, kind: ModalKind, ok: bool, message: String) {
+        match &mut self.modal {
+            Some(m) if m.device == device && m.kind == kind => {
+                if ok {
+                    m.phase = Phase::Done { ok, message };
+                } else {
+                    // Let the user fix the code and retry without retyping.
+                    m.phase = if kind == ModalKind::Pair {
+                        Phase::Input { error: Some(message) }
+                    } else {
+                        Phase::Done { ok, message }
+                    };
+                }
+            }
+            // Dialog was dismissed while working; the log has the outcome.
+            _ => {}
+        }
+    }
+
+    /// Something is moving on screen (needs fast redraws).
+    pub fn animating(&self) -> bool {
+        matches!(self.modal, Some(Modal { phase: Phase::Working { .. }, .. }))
+    }
+
+    fn open_modal(&mut self, kind: ModalKind) {
+        if self.devices.is_empty() {
+            return;
+        }
+        let device = self.selected;
+        let paired = self.health(device) != Health::Unpaired;
+        let id = self.config.devices[device].id.get_ref().clone();
+        let phase = match (kind, paired) {
+            (ModalKind::Pair, true) => Phase::Done {
+                ok: false,
+                message: format!("`{id}` is already paired. Press U to unpair it first."),
+            },
+            (ModalKind::Unpair, false) => Phase::Done { ok: false, message: format!("`{id}` isn't paired.") },
+            (ModalKind::Pair, false) if !self.can_pair => Phase::Done {
+                ok: false,
+                message: "Attestation roots are missing. Quit, run `mattertui fetch-roots`, then restart.".into(),
+            },
+            _ => Phase::Input { error: None },
+        };
+        self.modal = Some(Modal { kind, device, input: String::new(), phase });
+    }
+
+    fn on_modal_key(&mut self, key: KeyEvent) {
+        let Some(m) = &mut self.modal else { return };
+        match (&m.phase, key.code) {
+            // Closing never cancels work in flight; the outcome still lands in the log.
+            (_, KeyCode::Esc) => self.modal = None,
+            (Phase::Done { .. }, KeyCode::Enter) => self.modal = None,
+            (Phase::Input { .. }, KeyCode::Backspace) if m.kind == ModalKind::Pair => {
+                m.input.pop();
+                m.phase = Phase::Input { error: None };
+            }
+            (Phase::Input { .. }, KeyCode::Char(c)) if m.kind == ModalKind::Pair => {
+                // Digits, separators, and the QR alphabet (base38: A-Z 0-9 - .) plus "MT:".
+                if (c.is_ascii_alphanumeric() || matches!(c, '-' | ' ' | '.' | ':')) && m.input.len() < 40 {
+                    m.input.push(c.to_ascii_uppercase());
+                    m.phase = Phase::Input { error: None };
+                }
+            }
+            (Phase::Input { .. }, KeyCode::Enter) if m.kind == ModalKind::Pair => {
+                match crate::matter::pairing::normalize_code(&m.input) {
+                    Ok(code) => {
+                        self.action = Some(Action::Pair { device: m.device, code });
+                        m.phase = Phase::Working { since: Instant::now() };
+                    }
+                    Err(e) => m.phase = Phase::Input { error: Some(e.to_string()) },
+                }
+            }
+            (Phase::Input { .. }, KeyCode::Char('y' | 'Y')) if m.kind == ModalKind::Unpair => {
+                self.action = Some(Action::Unpair { device: m.device });
+                m.phase = Phase::Working { since: Instant::now() };
+            }
+            (Phase::Input { .. }, KeyCode::Char('n' | 'N')) if m.kind == ModalKind::Unpair => self.modal = None,
+            _ => {}
         }
     }
 
@@ -176,8 +321,17 @@ impl App {
 
     fn on_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('c') {
+            self.quit = true;
+            return;
+        }
+        if self.modal.is_some() {
+            self.on_modal_key(key);
+            return;
+        }
         match key.code {
-            KeyCode::Char('c') if ctrl => self.quit = true,
+            KeyCode::Char('p') => self.open_modal(ModalKind::Pair),
+            KeyCode::Char('U') => self.open_modal(ModalKind::Unpair),
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.show_help = !self.show_help,
             KeyCode::Esc if self.show_help => self.show_help = false,
@@ -277,7 +431,10 @@ impl App {
         match &d.status {
             Status::Unpaired => Health::Unpaired,
             Status::Connecting => Health::Connecting,
-            Status::Reconnecting { .. } => Health::Reconnecting,
+            // Resubscribes are routine (sleepy devices, Wi-Fi blips) and the
+            // last values are still good, so only escalate if it drags on.
+            Status::Reconnecting { .. } if d.status_since.elapsed() < RECONNECT_GRACE => Health::Reconnecting,
+            Status::Reconnecting { .. } => Health::Stale,
             Status::Offline { .. } => Health::Offline,
             Status::Live { max_interval_s } => {
                 let allowed = Duration::from_secs(u64::from(*max_interval_s) * 2 + 30);
@@ -290,14 +447,25 @@ impl App {
     }
 }
 
+/// How long a reconnect stays low-key before the tile shows it as stale.
+const RECONNECT_GRACE: Duration = Duration::from_secs(120);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Health {
     Unpaired,
     Connecting,
     Live,
     Stale,
+    /// Briefly re-establishing the subscription; values are still current.
     Reconnecting,
     Offline,
+}
+
+impl Health {
+    /// Live, or close enough that values should look normal.
+    pub fn is_ok(self) -> bool {
+        matches!(self, Health::Live | Health::Reconnecting)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

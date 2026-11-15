@@ -197,9 +197,10 @@ a normal subscription works; the device just negotiates a long `max_interval`.
 - **Check-in listener:** a background task loops on
   `listen_for_checkin_once(port)`. Each check-in triggers
   `resubscribe_now(node_id)`.
-- **This is the main unknown.** The listener advertises from a second mDNS
-  responder, so milestone 1 tests it on real hardware on both OSes. If the
-  sensors turn out to be SIT, the listener is a no-op we can leave out.
+- **Resolved (2026-11-15): not needed.** The battery sensor (IKEA
+  TIMMERFLOTTE, Thread) is SIT with no check-in support, idling up to 300 s.
+  Plain subscriptions work, and staleness uses the negotiated `max_interval`.
+  The listener is left out unless a LIT device turns up.
 
 ---
 
@@ -438,5 +439,5 @@ The app code is identical on both platforms. Only OS-level network setup differs
    `unpair`, single-instance lock. Readings are logged to stderr.
 3. **Static dashboard:** log panel (first, so the rest can be debugged in it), layout and snapshot tests, rooms, tiles, detail chart,
    theme and fallback.
-4. **Pairing and unpairing in the TUI**, plus the ICD listener if needed.
+4. **Pairing and unpairing in the TUI** (done). The ICD listener was not needed (see §5).
 5. **Motion:** frame clock, tweens, effects, ticker.

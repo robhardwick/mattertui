@@ -82,8 +82,15 @@ async fn main() -> Result<()> {
         Some(Command::Unpair { device_id }) => {
             let _lock = paths.lock()?;
             let ctl = matter::open(&paths, Trust::NotNeeded).await?;
-            matter::pairing::unpair(&ctl, &device_id).await?;
-            println!("unpaired `{device_id}`");
+            if matter::pairing::unpair(&ctl, &device_id).await? {
+                println!("unpaired `{device_id}`");
+            } else {
+                println!(
+                    "forgot `{device_id}` locally, but couldn't reach it: remove \"{}\" under its \
+                     Connected Services in the Home app",
+                    matter::pairing::FABRIC_LABEL
+                );
+            }
             Ok(())
         }
         Some(Command::Nodes { probe }) => {

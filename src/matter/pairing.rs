@@ -119,34 +119,53 @@ pub async fn read_icd_features(node: &matter_controller::Node) -> Result<Option<
     Ok(decode::find(&report, 0, ICD_MANAGEMENT, ATTR_FEATURE_MAP).and_then(decode::as_u64))
 }
 
+/// How long to try reaching the device before just forgetting it locally.
+const UNPAIR_DEVICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Remove our fabric from the device and forget it locally. If the device
-/// is unreachable, only the local state is dropped.
-pub async fn unpair(ctl: &Controller, device_id: &str) -> Result<()> {
+/// is unreachable, only the local state is dropped. Returns whether the
+/// device itself confirmed the removal.
+pub async fn unpair(ctl: &Controller, device_id: &str) -> Result<bool> {
     let Some(info) = node_by_label(&ctl.inner, device_id).await? else {
         bail!("`{device_id}` is not paired");
     };
     let node = ctl.inner.node(info.node_id);
 
-    if let Err(e) = node.unregister_icd_client().await {
-        tracing::debug!(device = device_id, error = %e, "ICD unregister skipped");
-    }
-
-    match remove_own_fabric(&node).await {
-        Ok(()) => tracing::info!(device = device_id, "removed our fabric from the device"),
-        Err(e) => tracing::warn!(
-            device = device_id,
-            error = %e,
-            "could not remove our fabric from the device; remove \"{FABRIC_LABEL}\" under \
-             Connected Services in the Home app"
-        ),
-    }
+    let on_device = async {
+        if let Err(e) = node.unregister_icd_client().await {
+            tracing::debug!(device = device_id, error = %e, "ICD unregister skipped");
+        }
+        remove_own_fabric(&node).await
+    };
+    let removed = match tokio::time::timeout(UNPAIR_DEVICE_TIMEOUT, on_device).await {
+        Ok(Ok(())) => {
+            tracing::info!(device = device_id, "removed our fabric from the device");
+            true
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                device = device_id,
+                error = %e,
+                "could not remove our fabric from the device; remove \"{FABRIC_LABEL}\" under \
+                 Connected Services in the Home app"
+            );
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                device = device_id,
+                "device didn't answer; remove \"{FABRIC_LABEL}\" under Connected Services in the Home app"
+            );
+            false
+        }
+    };
 
     ctl.inner
         .forget_node(info.node_id)
         .await
         .context("forgetting node")?;
     tracing::info!(device = device_id, "forgotten locally");
-    Ok(())
+    Ok(removed)
 }
 
 /// `Node::remove_fabric` deliberately refuses to remove the caller's own

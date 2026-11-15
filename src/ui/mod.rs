@@ -7,6 +7,7 @@ pub mod series;
 pub mod theme;
 pub mod widgets;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,41 +19,44 @@ use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 
-use self::app::{App, View};
+use self::app::{Action, App, View};
 use self::theme::Theme;
-use self::widgets::{chrome, detail, room, tile};
+use self::widgets::{chrome, detail, modal, room, tile};
 use crate::config::Config;
 use crate::logbuf::LogBuffer;
 use crate::matter::readonly::ReadOnlyNode;
 use crate::matter::worker::{self, WorkerSpec};
-use crate::matter::{self, Trust};
+use crate::matter::{self, Controller, Trust, pairing};
 use crate::paths::Paths;
 use crate::state::{AppEvent, DeviceUpdate, Status};
 
 pub async fn run(paths: &Paths, config: Config, logs: Arc<LogBuffer>) -> Result<()> {
     let _lock = paths.lock()?;
-    let ctl = matter::open(paths, Trust::NotNeeded).await?;
+    // The log panel isn't on screen yet, so say why we might be waiting.
+    if !matter::clock_is_sane() {
+        eprintln!("waiting for the system clock to be set (NTP)…");
+    }
+    let ctl = matter::open(paths, Trust::IfAvailable).await?;
     let (tx, rx) = mpsc::channel::<AppEvent>(1024);
     let mut app = App::new(config, logs, Theme::detect());
+    app.can_pair = ctl.can_commission;
+    let mut rt = Runtime {
+        ctl,
+        tx,
+        workers: HashMap::new(),
+    };
 
-    let nodes = ctl.inner.nodes().await?;
-    for (i, dev) in app.config.devices.iter().enumerate() {
-        let id = dev.id.get_ref();
+    let nodes = rt.ctl.inner.nodes().await?;
+    for i in 0..app.config.devices.len() {
+        let id = app.config.devices[i].id.get_ref().clone();
         match nodes.iter().find(|n| n.label.as_deref() == Some(id.as_str())) {
             Some(n) => {
                 app.devices[i].apply(DeviceUpdate::Status(Status::Connecting));
-                worker::spawn(
-                    WorkerSpec {
-                        device_id: id.clone(),
-                        kind: dev.kind,
-                        endpoint: dev.endpoint,
-                    },
-                    ReadOnlyNode::new(ctl.inner.node(n.node_id)),
-                    tx.clone(),
-                );
+                rt.start_worker(&app, i, n.node_id);
             }
-            None => tracing::warn!(device = id, "not paired; run `mattertui pair {id} <code>`"),
+            None => tracing::warn!(device = id, "not paired; select it and press p to pair"),
         }
     }
     for n in &nodes {
@@ -67,23 +71,130 @@ pub async fn run(paths: &Paths, config: Config, logs: Arc<LogBuffer>) -> Result<
     }
 
     let mut terminal = ratatui::try_init()?;
-    let result = event_loop(&mut terminal, &mut app, rx).await;
+    let result = event_loop(&mut terminal, &mut app, &mut rt, rx).await;
     ratatui::restore();
-    // `tx` lives until here so the event channel never closes under the loop.
-    drop(tx);
     result
 }
 
-async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, mut rx: mpsc::Receiver<AppEvent>) -> Result<()> {
+/// What the event loop needs to act on devices: the controller, the event
+/// channel, and a handle per running device worker.
+struct Runtime {
+    ctl: Controller,
+    /// Also keeps the event channel open while no workers are running.
+    tx: mpsc::Sender<AppEvent>,
+    workers: HashMap<usize, AbortHandle>,
+}
+
+impl Runtime {
+    fn start_worker(&mut self, app: &App, device: usize, node_id: u64) {
+        let dev = &app.config.devices[device];
+        let handle = worker::spawn(
+            WorkerSpec {
+                device_id: dev.id.get_ref().clone(),
+                kind: dev.kind,
+                endpoint: dev.endpoint,
+            },
+            ReadOnlyNode::new(self.ctl.inner.node(node_id)),
+            self.tx.clone(),
+        );
+        if let Some(old) = self.workers.insert(device, handle) {
+            old.abort();
+        }
+    }
+
+    /// Start pairing/unpairing in the background; the outcome comes back
+    /// as an `AppEvent`.
+    fn start(&mut self, app: &App, action: Action) {
+        let ctl = self.ctl.clone();
+        let tx = self.tx.clone();
+        match action {
+            Action::Pair { device, code } => {
+                let id = app.config.devices[device].id.get_ref().clone();
+                tokio::spawn(async move {
+                    let result = pairing::pair(&ctl, &id, &code)
+                        .await
+                        .map(|info| info.node_id)
+                        .map_err(|e| {
+                            tracing::warn!(device = id, "pairing failed: {e:#}");
+                            friendly_error(&e)
+                        });
+                    let _ = tx.send(AppEvent::Paired { id, result }).await;
+                });
+            }
+            Action::Unpair { device } => {
+                // Stop the worker first so its subscription goes away.
+                if let Some(h) = self.workers.remove(&device) {
+                    h.abort();
+                }
+                let id = app.config.devices[device].id.get_ref().clone();
+                tokio::spawn(async move {
+                    let result = pairing::unpair(&ctl, &id)
+                        .await
+                        .map(|removed| {
+                            if removed {
+                                "Removed from the device. You can pair it again with a new setup code.".to_string()
+                            } else {
+                                format!(
+                                    "Forgotten locally, but the device couldn't be reached. Remove \"{}\" \
+                                     under the device's Connected Services in the Home app.",
+                                    pairing::FABRIC_LABEL
+                                )
+                            }
+                        })
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(AppEvent::Unpaired { id, result }).await;
+                });
+            }
+        }
+    }
+
+    /// React to outcomes that need the controller (before the app sees them).
+    fn on_event(&mut self, app: &App, event: &AppEvent) {
+        if let AppEvent::Paired { id, result: Ok(node_id) } = event
+            && let Some(device) = app.config.devices.iter().position(|d| d.id.get_ref() == id)
+        {
+            self.start_worker(app, device, *node_id);
+        }
+    }
+}
+
+/// Turn a pairing error into a sentence for the dialog.
+fn friendly_error(e: &anyhow::Error) -> String {
+    let text = format!("{e:#}");
+    if text.contains("not found via mDNS") {
+        "Couldn't find the device in pairing mode. Check pairing mode is still on in the Home app \
+         (it times out after a few minutes), then try again."
+            .into()
+    } else if text.contains("PASE") || text.contains("passcode") {
+        format!("The device rejected the code. Get a fresh code from the Home app and try again. ({text})")
+    } else {
+        text
+    }
+}
+
+async fn event_loop(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    rt: &mut Runtime,
+    mut rx: mpsc::Receiver<AppEvent>,
+) -> Result<()> {
     let logs = app.logs.clone();
     let mut events = crossterm::event::EventStream::new();
-    // Clock, "ago" labels and staleness need a redraw even when idle.
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         terminal.draw(|f| draw(f, app))?;
         if app.quit {
             return Ok(());
         }
+        if let Some(action) = app.action.take() {
+            rt.start(app, action);
+        }
+        // Clock, "ago" labels and staleness need a redraw even when idle;
+        // spinners need it often.
+        let wait = if app.animating() {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(1)
+        };
         tokio::select! {
             event = events.next() => match event {
                 Some(Ok(e)) => app.on_terminal_event(e),
@@ -91,13 +202,15 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, mut rx: mpsc:
                 None => return Ok(()),
             },
             Some(event) = rx.recv() => {
+                rt.on_event(app, &event);
                 app.on_app_event(event);
                 while let Ok(event) = rx.try_recv() {
+                    rt.on_event(app, &event);
                     app.on_app_event(event);
                 }
             }
             () = logs.notify.notified() => {}
-            _ = tick.tick() => {}
+            () = tokio::time::sleep(wait) => {}
         }
     }
 }
@@ -123,6 +236,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.log_open {
         chrome::log_panel(app, log, buf);
+    }
+    if let Some(m) = &app.modal {
+        modal::render(app, m, area, buf);
     }
     if app.show_help {
         chrome::help(app, area, buf);
@@ -163,7 +279,7 @@ fn dashboard(app: &mut App, body: Rect, buf: &mut Buffer) {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_support {
     use super::*;
     use crate::state::{DeviceInfo, IcdInfo, Metric, Transport, unix_minute};
     use ratatui::Terminal;
@@ -226,7 +342,7 @@ icon = "plug"
 "#;
 
     /// A plausible house: live readings plus an hour of history.
-    fn fake_app() -> App {
+    pub fn fake_app() -> App {
         let config = Config::parse(CONFIG).unwrap();
         let mut app = App::new(config, LogBuffer::new(), Theme { truecolor: true, ascii: false });
         let now = unix_minute();
@@ -269,7 +385,7 @@ icon = "plug"
         app
     }
 
-    fn render(app: &mut App, w: u16, h: u16) -> String {
+    pub fn render(app: &mut App, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| draw(f, app)).unwrap();
         let buf = term.backend().buffer();
@@ -280,7 +396,7 @@ icon = "plug"
     }
 
     /// Strip the volatile clock so snapshots are stable.
-    fn stable(s: String) -> String {
+    pub fn stable(s: String) -> String {
         let mut lines: Vec<String> = s.lines().map(str::to_string).collect();
         // The top bar ends with the clock, "HH:MM".
         if let Some(top) = lines.first_mut()
@@ -290,6 +406,12 @@ icon = "plug"
         }
         lines.join("\n")
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::app::View;
+    use super::tests_support::*;
 
     #[test]
     fn dashboard_wide() {
@@ -308,6 +430,129 @@ icon = "plug"
     fn detail_view() {
         let mut app = fake_app();
         app.view = View::Detail;
+        insta::assert_snapshot!(stable(render(&mut app, 100, 30)));
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::app::Health;
+    use super::tests_support::*;
+    use crate::state::Status;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn brief_reconnect_is_subtle_then_escalates() {
+        let mut app = fake_app();
+        app.devices[2].status = Status::Reconnecting { cause: "timeout".into() };
+        app.devices[2].status_since = Instant::now();
+        assert_eq!(app.health(2), Health::Reconnecting);
+        assert!(app.health(2).is_ok());
+        let screen = render(&mut app, 130, 34);
+        assert!(!screen.contains("reconnecting"), "no loud text on the dashboard");
+        assert!(screen.contains("5/6 live"), "still counted as live");
+
+        app.devices[2].status_since = Instant::now() - Duration::from_secs(600);
+        assert_eq!(app.health(2), Health::Stale);
+    }
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::app::{Action, ModalKind, Phase};
+    use super::tests_support::*;
+    use crate::state::{AppEvent, Status};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(app: &mut super::App, code: KeyCode) {
+        app.on_terminal_event(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    fn type_str(app: &mut super::App, s: &str) {
+        for c in s.chars() {
+            key(app, KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn pair_flow_from_keypress_to_done() {
+        let mut app = fake_app();
+        app.can_pair = true;
+        app.devices[3].status = Status::Unpaired;
+        app.selected = 3;
+
+        key(&mut app, KeyCode::Char('p'));
+        let m = app.modal.as_ref().unwrap();
+        assert_eq!((m.kind, &m.phase), (ModalKind::Pair, &Phase::Input { error: None }));
+
+        // A bad code stays in the dialog with an error; no action starts.
+        type_str(&mut app, "3497-011-2333");
+        key(&mut app, KeyCode::Enter);
+        assert!(app.action.is_none());
+        assert!(matches!(app.modal.as_ref().unwrap().phase, Phase::Input { error: Some(_) }));
+
+        key(&mut app, KeyCode::Backspace);
+        type_str(&mut app, "2");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.action, Some(Action::Pair { device: 3, code: "34970112332".into() }));
+        assert!(app.animating());
+
+        app.on_app_event(AppEvent::Paired { id: "bedside".into(), result: Ok(7) });
+        assert!(matches!(app.modal.as_ref().unwrap().phase, Phase::Done { ok: true, .. }));
+        assert_eq!(app.devices[3].status, Status::Connecting);
+        key(&mut app, KeyCode::Enter);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn failed_pairing_returns_to_input_for_retry() {
+        let mut app = fake_app();
+        app.can_pair = true;
+        app.devices[3].status = Status::Unpaired;
+        app.selected = 3;
+        key(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "34970112332");
+        key(&mut app, KeyCode::Enter);
+        app.on_app_event(AppEvent::Paired { id: "bedside".into(), result: Err("not found".into()) });
+        let m = app.modal.as_ref().unwrap();
+        assert_eq!(m.input, "34970112332", "code kept for retry");
+        assert_eq!(m.phase, Phase::Input { error: Some("not found".into()) });
+    }
+
+    #[test]
+    fn pairing_needs_roots_and_an_unpaired_device() {
+        let mut app = fake_app();
+        app.selected = 0; // paired
+        key(&mut app, KeyCode::Char('p'));
+        assert!(matches!(app.modal.as_ref().unwrap().phase, Phase::Done { ok: false, .. }));
+        key(&mut app, KeyCode::Esc);
+
+        app.devices[0].status = Status::Unpaired;
+        key(&mut app, KeyCode::Char('p')); // can_pair is false
+        let Phase::Done { message, .. } = &app.modal.as_ref().unwrap().phase else { panic!() };
+        assert!(message.contains("fetch-roots"));
+    }
+
+    #[test]
+    fn unpair_confirms_then_resets_device() {
+        let mut app = fake_app();
+        app.selected = 0;
+        key(&mut app, KeyCode::Char('U'));
+        key(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.action, Some(Action::Unpair { device: 0 }));
+        app.on_app_event(AppEvent::Unpaired { id: "lamp".into(), result: Ok("Removed".into()) });
+        assert_eq!(app.devices[0].status, Status::Unpaired);
+        assert!(app.devices[0].current.is_empty());
+    }
+
+    #[test]
+    fn modal_snapshot() {
+        let mut app = fake_app();
+        app.can_pair = true;
+        app.devices[3].status = Status::Unpaired;
+        app.selected = 3;
+        key(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "3497-011-2");
         insta::assert_snapshot!(stable(render(&mut app, 100, 30)));
     }
 }

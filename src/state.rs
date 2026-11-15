@@ -36,6 +36,10 @@ impl Metric {
 #[derive(Debug)]
 pub enum AppEvent {
     Device { id: String, update: DeviceUpdate },
+    /// Commissioning finished: the new node id, or an error message.
+    Paired { id: String, result: Result<u64, String> },
+    /// Unpairing finished: a note for the user (e.g. "removed from device").
+    Unpaired { id: String, result: Result<String, String> },
 }
 
 /// One update from a device worker.
@@ -98,6 +102,8 @@ pub struct DeviceState {
     pub current: BTreeMap<Metric, Option<f64>>,
     pub history: BTreeMap<Metric, History>,
     pub last_report: Option<Instant>,
+    /// When `status` last changed to a different kind of status.
+    pub status_since: Instant,
     history_minutes: usize,
 }
 
@@ -109,13 +115,19 @@ impl DeviceState {
             current: BTreeMap::new(),
             history: BTreeMap::new(),
             last_report: None,
+            status_since: Instant::now(),
             history_minutes: history_hours as usize * 60,
         }
     }
 
     pub fn apply(&mut self, update: DeviceUpdate) {
         match update {
-            DeviceUpdate::Status(s) => self.status = s,
+            DeviceUpdate::Status(s) => {
+                if std::mem::discriminant(&s) != std::mem::discriminant(&self.status) {
+                    self.status_since = Instant::now();
+                }
+                self.status = s;
+            }
             DeviceUpdate::Info(i) => self.info = Some(i),
             DeviceUpdate::Reading { metric, value } => {
                 self.last_report = Some(Instant::now());

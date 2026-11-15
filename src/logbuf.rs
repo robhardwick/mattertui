@@ -57,6 +57,11 @@ impl LogBuffer {
         self.warnings.load(Ordering::Relaxed)
     }
 
+    /// The newest line, if any.
+    pub fn last(&self) -> Option<LogLine> {
+        self.lines.lock().unwrap_or_else(|e| e.into_inner()).back().cloned()
+    }
+
     /// Copy of the buffered lines, oldest first.
     pub fn snapshot(&self) -> Vec<LogLine> {
         let lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());

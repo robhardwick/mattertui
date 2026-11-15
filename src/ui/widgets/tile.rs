@@ -82,7 +82,7 @@ fn row(area: Rect, n: u16) -> Rect {
 
 /// Values are dimmed when the device isn't live, so stale data looks stale.
 fn value_style(app: &App, device: usize, colour: Color) -> Style {
-    if app.health(device) == Health::Live {
+    if app.health(device).is_ok() {
         Style::new().fg(colour).add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(app.theme.dim())

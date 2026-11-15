@@ -10,12 +10,12 @@ use tracing::Level;
 use super::current;
 use crate::config::DeviceKind;
 use crate::state::Metric;
-use crate::ui::app::{App, Health};
+use crate::ui::app::App;
 
 pub fn top_bar(app: &App, area: Rect, buf: &mut Buffer) {
     let t = &app.theme;
     let total = app.devices.len();
-    let live = (0..total).filter(|&i| app.health(i) == Health::Live).count();
+    let live = (0..total).filter(|&i| app.health(i).is_ok()).count();
     let lights_on = (0..total)
         .filter(|&i| app.config.devices[i].kind == DeviceKind::Plug && current(&app.devices[i], Metric::On) == Some(1.0))
         .count();
@@ -105,6 +105,8 @@ const HELP: &[(&str, &str)] = &[
     ("←↓↑→ / hjkl", "move between devices"),
     ("Enter", "device detail (Esc to go back)"),
     ("[ ]", "chart range"),
+    ("p", "pair the selected device"),
+    ("U", "unpair the selected device"),
     ("`", "toggle log panel"),
     ("Tab", "focus log panel (↑↓ PgUp PgDn End)"),
     ("?", "this help"),

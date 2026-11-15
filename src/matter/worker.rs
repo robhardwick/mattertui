@@ -24,8 +24,9 @@ pub struct WorkerSpec {
     pub endpoint: Option<u16>,
 }
 
-pub fn spawn(spec: WorkerSpec, node: ReadOnlyNode, tx: mpsc::Sender<AppEvent>) {
-    tokio::spawn(run(spec, node, tx));
+/// Start a worker. Aborting the handle drops its subscription.
+pub fn spawn(spec: WorkerSpec, node: ReadOnlyNode, tx: mpsc::Sender<AppEvent>) -> tokio::task::AbortHandle {
+    tokio::spawn(run(spec, node, tx)).abort_handle()
 }
 
 async fn run(spec: WorkerSpec, node: ReadOnlyNode, tx: mpsc::Sender<AppEvent>) {
@@ -70,6 +71,8 @@ async fn stream(
         .await
         .context("subscribing")?;
 
+    // Resubscribes are routine; log them quietly.
+    let mut resubscribed = false;
     while let Some(event) = sub.next().await {
         match event {
             SubscriptionEvent::Report(r) => {
@@ -81,14 +84,19 @@ async fn stream(
             }
             SubscriptionEvent::Established { max_interval, .. } => {
                 *backoff = BACKOFF_START;
-                tracing::info!(device = spec.device_id, max_interval_s = max_interval, "subscribed");
+                if resubscribed {
+                    tracing::debug!(device = spec.device_id, max_interval_s = max_interval, "resubscribed");
+                } else {
+                    tracing::info!(device = spec.device_id, max_interval_s = max_interval, "subscribed");
+                }
                 send.status(Status::Live {
                     max_interval_s: max_interval,
                 })
                 .await;
             }
             SubscriptionEvent::Resubscribing { cause } => {
-                tracing::info!(device = spec.device_id, %cause, "resubscribing");
+                resubscribed = true;
+                tracing::debug!(device = spec.device_id, %cause, "resubscribing");
                 send.status(Status::Reconnecting {
                     cause: cause.to_string(),
                 })
