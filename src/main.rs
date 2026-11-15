@@ -1,9 +1,10 @@
-mod app;
 mod config;
+mod logbuf;
 mod matter;
 mod paths;
 mod roots;
 mod state;
+mod ui;
 
 use std::path::PathBuf;
 
@@ -52,14 +53,14 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_stderr_logging();
     let paths = Paths::resolve(cli.config)?;
+    if cli.command.is_none() {
+        return dashboard(&paths).await;
+    }
+    init_stderr_logging();
 
     match cli.command {
-        None => {
-            let config = Config::load(&paths.config_file)?;
-            app::run(&paths, &config).await
-        }
+        None => unreachable!("handled above"),
         Some(Command::Check) => check(&paths).await,
         Some(Command::FetchRoots) => {
             tokio::task::spawn_blocking(move || roots::fetch(&paths)).await?
@@ -140,6 +141,39 @@ async fn check(paths: &Paths) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Run the dashboard with logs captured in memory for the log panel. If it
+/// fails or panics, print the most recent log lines once the terminal is
+/// restored, so the context isn't lost.
+async fn dashboard(paths: &Paths) -> Result<()> {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let config = Config::load(&paths.config_file)?;
+    let logs = logbuf::LogBuffer::new();
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(&config.log.filter))
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(logs.layer())
+        .init();
+
+    // Runs after ratatui's own hook has restored the terminal.
+    let panic_logs = logs.clone();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        eprintln!("\nrecent log:\n{}", panic_logs.tail_text(50));
+    }));
+
+    let result = ui::run(paths, config, logs.clone()).await;
+    if result.is_err() {
+        eprintln!("recent log:\n{}", logs.tail_text(50));
+    }
+    result
 }
 
 fn init_stderr_logging() {

@@ -177,7 +177,6 @@ impl History {
         }
     }
 
-    #[allow(dead_code)] // used by the UI
     pub fn buckets(&self) -> impl Iterator<Item = &Bucket> {
         self.buckets.iter()
     }
@@ -188,7 +187,8 @@ impl History {
     }
 }
 
-fn unix_minute() -> i64 {
+/// Minutes since the Unix epoch (history bucket key).
+pub fn unix_minute() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| (d.as_secs() / 60) as i64)

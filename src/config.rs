@@ -1,9 +1,6 @@
 //! Declarative TOML config: rooms, devices and UI options. No coordinates;
 //! the layout engine places things from declaration order.
 
-// Some fields (names, icons, log options) are only read by the dashboard.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -80,8 +77,8 @@ pub enum LogPanel {
 pub struct Room {
     pub id: Spanned<String>,
     pub name: String,
-    pub icon: Option<String>,
-    pub accent: Option<String>,
+    pub icon: Option<Spanned<String>>,
+    pub accent: Option<Spanned<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,7 +89,7 @@ pub struct Device {
     pub name: String,
     pub room: Spanned<String>,
     pub kind: DeviceKind,
-    pub icon: Option<String>,
+    pub icon: Option<Spanned<String>>,
     #[serde(default)]
     pub featured: bool,
     /// Override endpoint auto-detection.
@@ -144,6 +141,21 @@ impl Config {
             if !room_ids.insert(room.id.get_ref().as_str()) {
                 err(room.id.span(), format!("duplicate room id `{}`", room.id.get_ref()));
             }
+            if let Some(icon) = &room.icon {
+                check_icon(icon, &mut err);
+            }
+            if let Some(accent) = &room.accent
+                && !crate::ui::theme::accent_names().any(|a| a == accent.get_ref())
+            {
+                err(
+                    accent.span(),
+                    format!(
+                        "unknown accent `{}` (one of: {})",
+                        accent.get_ref(),
+                        crate::ui::theme::accent_names().collect::<Vec<_>>().join(", ")
+                    ),
+                );
+            }
         }
 
         let mut device_ids = HashSet::new();
@@ -160,6 +172,9 @@ impl Config {
                     format!("unknown room `{}` (declare it with [[room]])", dev.room.get_ref()),
                 );
             }
+            if let Some(icon) = &dev.icon {
+                check_icon(icon, &mut err);
+            }
         }
 
         if errors.is_empty() {
@@ -171,6 +186,19 @@ impl Config {
 
     pub fn device(&self, id: &str) -> Option<&Device> {
         self.devices.iter().find(|d| d.id.get_ref() == id)
+    }
+}
+
+fn check_icon(icon: &Spanned<String>, err: &mut impl FnMut(std::ops::Range<usize>, String)) {
+    if !crate::ui::icons::is_valid(icon.get_ref()) {
+        err(
+            icon.span(),
+            format!(
+                "unknown icon `{}`: use a single symbol like \"★\", or one of: {}",
+                icon.get_ref(),
+                crate::ui::icons::names().collect::<Vec<_>>().join(", ")
+            ),
+        );
     }
 }
 
