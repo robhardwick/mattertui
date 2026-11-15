@@ -32,8 +32,7 @@ using Matter's Multi-Admin feature.
    single call with no progress callbacks, so the modal shows a spinner. The
    library's own `tracing` output streams into the log panel as it goes.
 4. It then sets the fabric label to `"mattertui"`, so it's easy to spot in Home →
-   Connected Services. If the device supports the ICD check-in protocol, it also
-   registers for check-ins (§5).
+   Connected Services.
 
 The commissioning `label` is the config's **device id**. That's the only link
 between config and controller state, so the config never contains node IDs.
@@ -47,7 +46,7 @@ This removes our fabric from the device, then calls `forget_node`. If the device
 can't be reached, the app only forgets it locally.
 
 **Read-only:** device workers get a `ReadOnlyNode` wrapper that only exposes
-`read` and `subscribe`. Only `pairing.rs` can commission, register ICD clients or
+`read` and `subscribe`. Only `pairing.rs` can commission, set the fabric label or
 remove fabrics.
 
 **Attestation roots:** retail devices need the production PAA and CD certificates
@@ -87,7 +86,6 @@ It's the library's own snapshot format, verified in the crate source:
   - vendor/product id
   - last known address
   - CASE resumption record, for fast reconnects
-- ICD check-in registrations
 
 Saves are atomic (temp file then rename) and the file mode is `0600`. **It holds
 private keys in the clear.** Anyone who copies it can act as this controller on
@@ -188,19 +186,17 @@ Battery Thread sensors are *Intermittently Connected Devices*: they sleep most o
 the time. Most temperature sensors are the **short idle time** (SIT) kind, where
 a normal subscription works; the device just negotiates a long `max_interval`.
 
-- **Staleness:** a tile only goes stale after the device's negotiated
-  `max_interval` plus a grace period, never a fixed timeout. Until then it shows
-  *sleeping · last report 6m ago*.
-- **Long idle time (LIT) devices** may drop the subscription while asleep. At
-  pairing, if `IcdManagement` (0x0046) FeatureMap reports the Check-In Protocol,
-  the app registers as a check-in client.
-- **Check-in listener:** a background task loops on
-  `listen_for_checkin_once(port)`. Each check-in triggers
-  `resubscribe_now(node_id)`.
-- **Resolved (2026-11-15): not needed.** The battery sensor (IKEA
-  TIMMERFLOTTE, Thread) is SIT with no check-in support, idling up to 300 s.
-  Plain subscriptions work, and staleness uses the negotiated `max_interval`.
-  The listener is left out unless a LIT device turns up.
+- **Staleness:** a tile only goes stale after twice the device's negotiated
+  `max_interval` plus 30 s, never a fixed timeout.
+- **No check-in support (decided 2026-11-15).** The battery sensor (IKEA
+  TIMMERFLOTTE, Thread) is SIT with no check-in support, idling up to 300 s,
+  and plain subscriptions work. So the app neither registers as a check-in
+  client nor runs a listener.
+- **If a long idle time (LIT) device turns up:** `mattertui nodes --probe`
+  prints each device's ICD type. LIT devices may drop subscriptions while
+  asleep. Supporting one would mean registering at pairing
+  (`Node::register_icd_client`) and a background
+  `listen_for_checkin_once` → `resubscribe_now` loop.
 
 ---
 
@@ -238,16 +234,18 @@ On resize the layout is recomputed and tiles animate to their new positions.
   applies to numbers, sparklines and chart lines. This is a small hand-written
   interpolation, not a crate.
 
-**Movement** (from `tachyonfx`, plus our own value tweens)
-- **Startup:** rooms sweep in one after another, and values count up.
-- **Updates:** values tween to the new number and the tile edge glows briefly.
-- **Plugs:** the lamp glyph warms up through amber when it turns on, and fades
-  when it turns off.
-- **Heating:** a flickering flame glyph, and shimmer along the heating band in
-  the chart.
-- **Connecting:** a spinner and a scanning border. A device going offline
-  dissolves to dim.
-- **Pairing success:** the tile coalesces into place.
+**Movement** (hand-rolled in `ui/motion.rs`; `tachyonfx` turned out not to be needed)
+- **Startup:** rooms sweep in left to right, one after another, behind a scan
+  line in the room's accent colour.
+- **Updates:** values tween to the new number (700 ms, ease-out) and the tile
+  border flashes in the room accent.
+- **Plugs:** "ON", the plug's icon colour and the room's lights count breathe
+  gently in warm amber.
+- **Heating:** the "heating" label flickers between flame colours.
+- **Connecting:** a braille spinner in the tile badge.
+- **Ticker:** a bottom line of recent changes (on/off, heating, moves of ≥0.5°,
+  offline / back online, paired). It scrolls as a marquee when it overflows.
+- **`m` / `ui.motion = false`** turns all of it off.
 
 **Chrome**
 - **Top bar:** title, devices live/total, lights on, clock.
@@ -260,7 +258,7 @@ On resize the layout is recomputed and tiles animate to their new positions.
   in and out.
 - **Content:** a live stream of `tracing` events from the app and from
   `matter-controller`: commissioning steps, subscription status,
-  resubscribes, ICD check-ins and errors.
+  resubscribes and errors.
 - **Line format:** `HH:MM:SS LEVEL target message`.
   - Levels are coloured: ERROR red, WARN amber, INFO cyan, DEBUG/TRACE dim.
   - When a line carries a `device` field, the device name is shown in its
@@ -276,8 +274,10 @@ On resize the layout is recomputed and tiles animate to their new positions.
 min/avg/max, vendor, product, firmware, transport, node id and subscription
 health.
 
-**Performance:** frames are only drawn while something is animating or has
-changed, at up to 30 fps. When idle the app does no drawing.
+**Performance:** 30 fps while something is actively animating, 10 fps for
+ambient motion (breathing lights, flicker, a scrolling ticker), otherwise one
+redraw per second for the clock and "ago" labels. On the Mac a release build
+used about 2.6% of one core with a light on.
 
 **Fallback:** the same code runs on both platforms.
 - Icons are Unicode symbols (`◉ ☼ ♨ ❄ ⌂`), not nerdfont or emoji. They have
@@ -387,7 +387,7 @@ src/
     app.rs        event loop, keys
     layout.rs     auto-layout
     theme.rs      palette, gradient, capability detection
-    anim.rs       tweens + tachyonfx registry
+    motion.rs     easing, tweens, colour mixing, ticker
     logbuf.rs     tracing Layer → ring buffer + AppEvent::Log
     widgets/      room, tile_plug, tile_sensor, tile_thermostat, chart, ticker, top_bar, log_panel, pair_modal, detail
 ```
@@ -403,7 +403,6 @@ src/
 | `serde`, `toml` | config |
 | `clap` (derive) | subcommands |
 | `ureq` (rustls), `serde_json` | `fetch-roots` only; blocking, so no async HTTP stack |
-| `tachyonfx` | effects |
 | `tui-big-text` | big readouts |
 | `tracing`, `tracing-subscriber` (`env-filter`) | in-app log panel; stderr for subcommands |
 | `insta` (dev) | layout and widget snapshot tests |
@@ -440,4 +439,4 @@ The app code is identical on both platforms. Only OS-level network setup differs
 3. **Static dashboard:** log panel (first, so the rest can be debugged in it), layout and snapshot tests, rooms, tiles, detail chart,
    theme and fallback.
 4. **Pairing and unpairing in the TUI** (done). The ICD listener was not needed (see §5).
-5. **Motion:** frame clock, tweens, effects, ticker.
+5. **Motion** (done): frame clock, tweens, flashes, sweep, breathing, ticker.

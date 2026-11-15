@@ -1,20 +1,14 @@
 //! The only code that writes to devices: commissioning (plus the fabric
-//! label and ICD check-in registration done straight after it) and unpairing.
+//! label set straight after it) and unpairing.
 
 use anyhow::{Context, Result, bail};
-use matter_controller::{CommandPath, IcdClientType, InvokeResult, NodeInfo, ReadPath, Value};
+use matter_controller::{CommandPath, InvokeResult, NodeInfo, ReadPath, Value};
 
 use super::{Controller, decode, node_by_label};
 
 const OPERATIONAL_CREDENTIALS: u32 = 0x003E;
 const ATTR_CURRENT_FABRIC_INDEX: u32 = 0x0005;
 const CMD_REMOVE_FABRIC: u32 = 0x0A;
-const ICD_MANAGEMENT: u32 = 0x0046;
-const ATTR_FEATURE_MAP: u32 = 0xFFFC;
-/// IcdManagement feature bit 0: Check-In Protocol Support.
-const ICD_FEATURE_CIP: u64 = 1 << 0;
-/// IcdManagement feature bit 2: Long Idle Time Support.
-const ICD_FEATURE_LITS: u64 = 1 << 2;
 
 pub const FABRIC_LABEL: &str = "mattertui";
 
@@ -89,34 +83,7 @@ pub async fn pair(ctl: &Controller, device_id: &str, code: &str) -> Result<NodeI
         tracing::warn!(device = device_id, error = %e, "could not set fabric label");
     }
 
-    // Register for ICD check-ins if the device supports them.
-    match read_icd_features(&node).await {
-        Ok(Some(features)) if features & ICD_FEATURE_CIP != 0 => {
-            let lit = features & ICD_FEATURE_LITS != 0;
-            match node
-                .register_icd_client(ctl.commissioner_node_id, IcdClientType::Permanent)
-                .await
-            {
-                Ok(_) => tracing::info!(device = device_id, lit, "registered for ICD check-ins"),
-                Err(e) => {
-                    tracing::warn!(device = device_id, error = %e, "ICD check-in registration failed")
-                }
-            }
-        }
-        Ok(Some(_)) => tracing::info!(device = device_id, "ICD without check-in support"),
-        Ok(None) => tracing::debug!(device = device_id, "not an ICD"),
-        Err(e) => tracing::warn!(device = device_id, error = %e, "could not read ICD features"),
-    }
-
     Ok(info)
-}
-
-/// IcdManagement FeatureMap, or `None` if the device has no such cluster.
-pub async fn read_icd_features(node: &matter_controller::Node) -> Result<Option<u64>> {
-    let report = node
-        .read(&[ReadPath::concrete(0, ICD_MANAGEMENT, ATTR_FEATURE_MAP)])
-        .await?;
-    Ok(decode::find(&report, 0, ICD_MANAGEMENT, ATTR_FEATURE_MAP).and_then(decode::as_u64))
 }
 
 /// How long to try reaching the device before just forgetting it locally.
@@ -131,13 +98,7 @@ pub async fn unpair(ctl: &Controller, device_id: &str) -> Result<bool> {
     };
     let node = ctl.inner.node(info.node_id);
 
-    let on_device = async {
-        if let Err(e) = node.unregister_icd_client().await {
-            tracing::debug!(device = device_id, error = %e, "ICD unregister skipped");
-        }
-        remove_own_fabric(&node).await
-    };
-    let removed = match tokio::time::timeout(UNPAIR_DEVICE_TIMEOUT, on_device).await {
+    let removed = match tokio::time::timeout(UNPAIR_DEVICE_TIMEOUT, remove_own_fabric(&node)).await {
         Ok(Ok(())) => {
             tracing::info!(device = device_id, "removed our fabric from the device");
             true

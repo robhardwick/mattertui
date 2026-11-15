@@ -49,19 +49,12 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
             format!("{} {}", info.vendor.as_deref().unwrap_or("?"), info.product.as_deref().unwrap_or("?")),
             t.text(),
         ));
-        let mut rest = vec![
+        let rest = vec![
             info.firmware.as_ref().map(|f| format!("fw {f}")),
             Some(transport_name(info.transport).to_string()).filter(|s| !s.is_empty()),
             Some(format!("node 0x{:X}", info.node_id)),
             Some(format!("endpoint {}", info.endpoint)),
         ];
-        if let Some(icd) = info.icd {
-            rest.push(Some(format!(
-                "battery ICD ({}{})",
-                if icd.long_idle_time { "LIT" } else { "SIT" },
-                icd.idle_mode_s.map_or(String::new(), |s| format!(", sleeps {s}s")),
-            )));
-        }
         for s in rest.into_iter().flatten() {
             facts.push(Span::styled(format!("  ·  {s}"), t.muted()));
         }
@@ -75,7 +68,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     let mut status = match health_badge(app, health) {
         None => vec![Span::styled("● live", Style::new().fg(t.good()))],
         Some((text, c)) => {
-            let text = if health == crate::ui::app::Health::Reconnecting { "reconnecting" } else { text };
+            let text = if health == crate::ui::app::Health::Reconnecting { "reconnecting" } else { &text };
             vec![Span::styled(format!("● {text}"), Style::new().fg(c))]
         }
     };

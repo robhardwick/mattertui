@@ -30,7 +30,6 @@ const SANE_CLOCK_UNIX: u64 = 1_704_067_200;
 #[derive(Clone)]
 pub struct Controller {
     pub inner: MatterController,
-    pub commissioner_node_id: u64,
     /// Attestation roots were loaded, so `commission` can work.
     pub can_commission: bool,
 }
@@ -71,31 +70,26 @@ pub async fn open(paths: &Paths, trust: Trust) -> Result<Controller> {
     let controller = builder.build().await.context("opening Matter controller")?;
 
     let fabrics = controller.fabrics().await.context("listing fabrics")?;
-    let commissioner_node_id = match fabrics.first() {
-        Some(f) => f.commissioner_node_id,
-        None => {
-            let now = unix_now();
-            controller
-                .create_fabric(FabricConfig::new(
-                    FABRIC_ID,
-                    RCAC_ID,
-                    COMMISSIONER_NODE_ID,
-                    (
-                        // Backdated an hour to tolerate device clock skew.
-                        MatterTime::from_unix_secs(now.saturating_sub(3600)),
-                        MatterTime::NO_EXPIRY,
-                    ),
-                ))
-                .await
-                .context("creating fabric")?;
-            tracing::info!(store = %paths.store().display(), "created new fabric");
-            COMMISSIONER_NODE_ID
-        }
-    };
+    if fabrics.is_empty() {
+        let now = unix_now();
+        controller
+            .create_fabric(FabricConfig::new(
+                FABRIC_ID,
+                RCAC_ID,
+                COMMISSIONER_NODE_ID,
+                (
+                    // Backdated an hour to tolerate device clock skew.
+                    MatterTime::from_unix_secs(now.saturating_sub(3600)),
+                    MatterTime::NO_EXPIRY,
+                ),
+            ))
+            .await
+            .context("creating fabric")?;
+        tracing::info!(store = %paths.store().display(), "created new fabric");
+    }
 
     Ok(Controller {
         inner: controller,
-        commissioner_node_id,
         can_commission,
     })
 }

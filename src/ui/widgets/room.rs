@@ -26,7 +26,7 @@ pub fn render(app: &App, room: usize, area: Rect, buf: &mut Buffer) {
 
     let mut title = vec![Span::raw(" ")];
     if let Some(icon) = cfg.icon.as_ref().and_then(|i| icons::resolve(i.get_ref(), t.ascii)) {
-        title.push(Span::styled(format!("{icon} "), Style::new().fg(accent)));
+        title.push(Span::styled(format!("{} ", icons::pad2(icon)), Style::new().fg(accent)));
     }
     title.push(Span::styled(cfg.name.clone(), Style::new().fg(accent).add_modifier(Modifier::BOLD)));
     title.push(Span::raw(" "));
@@ -44,11 +44,11 @@ pub fn render(app: &App, room: usize, area: Rect, buf: &mut Buffer) {
         .render(area, buf);
 }
 
-/// e.g. " 19.8° · 45% · ☼ 1/2 "
+/// e.g. " 19.8° · 45% · 💡 1/2 "
 fn summary(app: &App, devices: &[usize]) -> Vec<Span<'static>> {
     let t = &app.theme;
     let mean = |m: Metric| {
-        let v: Vec<f64> = devices.iter().filter_map(|&i| current(&app.devices[i], m)).collect();
+        let v: Vec<f64> = devices.iter().filter_map(|&i| app.shown(i, m)).collect();
         (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
     };
     let mut parts: Vec<Span<'static>> = Vec::new();
@@ -72,8 +72,8 @@ fn summary(app: &App, devices: &[usize]) -> Vec<Span<'static>> {
     if !plugs.is_empty() {
         let on = plugs.iter().filter(|&&i| current(&app.devices[i], Metric::On) == Some(1.0)).count();
         sep(&mut parts);
-        let glyph = icons::resolve("lamp", t.ascii).unwrap_or("*");
-        let colour = if on > 0 { t.glow() } else { t.dim() };
+        let glyph = icons::cell("lamp", t.ascii);
+        let colour = if on > 0 { super::glow(app) } else { t.dim() };
         parts.push(Span::styled(format!("{glyph} {on}/{}", plugs.len()), Style::new().fg(colour)));
     }
     if parts.is_empty() {

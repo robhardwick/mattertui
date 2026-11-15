@@ -1,5 +1,6 @@
 //! UI state and input handling. Rendering lives in `widgets`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,10 +8,12 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 
 use super::layout::{self, Layout, RoomSpec, TileSpec};
+use super::motion::{self, Ticker, Tone, Tween};
 use super::theme::Theme;
 use crate::config::{Config, LogPanel};
 use crate::logbuf::LogBuffer;
-use crate::state::{AppEvent, DeviceState, Status};
+use crate::config::DeviceKind;
+use crate::state::{AppEvent, DeviceState, DeviceUpdate, Metric, Status};
 
 /// Chart/sparkline ranges in minutes.
 const RANGES: &[(i64, &str)] = &[
@@ -55,6 +58,20 @@ pub struct App {
     pub action: Option<Action>,
     /// Attestation roots are loaded, so pairing can work.
     pub can_pair: bool,
+    /// Animations on (config `ui.motion`, toggled with `m`).
+    pub motion: bool,
+    /// When the dashboard first appeared (startup sweep).
+    pub epoch: Instant,
+    tweens: HashMap<(usize, Metric), Tween>,
+    /// Last time each device reported, for the update flash.
+    flashes: HashMap<usize, Instant>,
+    pub ticker: Ticker,
+    /// The ticker overflowed its line last frame and is scrolling.
+    pub ticker_scrolling: bool,
+    /// Last temperature announced in the ticker, per device.
+    announced: HashMap<usize, f64>,
+    /// Devices that went offline after being live (for "back online").
+    lost: std::collections::HashSet<usize>,
 }
 
 #[derive(Debug)]
@@ -107,6 +124,7 @@ impl App {
             })
             .collect();
         let log_open = config.log.panel == LogPanel::Open;
+        let motion = config.ui.motion;
         let seen_warnings = logs.warnings();
         // Default to the 1h range, or the longest one history allows.
         let range = 1.min(max_range_index(config.ui.history_hours));
@@ -130,6 +148,14 @@ impl App {
             modal: None,
             action: None,
             can_pair: false,
+            motion,
+            epoch: Instant::now(),
+            tweens: HashMap::new(),
+            flashes: HashMap::new(),
+            ticker: Ticker::default(),
+            ticker_scrolling: false,
+            announced: HashMap::new(),
+            lost: Default::default(),
         }
     }
 
@@ -198,6 +224,7 @@ impl App {
         match event {
             AppEvent::Device { id, update } => {
                 if let Some(i) = self.device_index(&id) {
+                    self.note_update(i, &update);
                     self.devices[i].apply(update);
                 }
             }
@@ -205,7 +232,10 @@ impl App {
                 let Some(i) = self.device_index(&id) else { return };
                 let (ok, message) = match result {
                     Ok(node_id) => {
-                        self.devices[i].apply(crate::state::DeviceUpdate::Status(Status::Connecting));
+                        self.devices[i].apply(DeviceUpdate::Status(Status::Connecting));
+                        let name = self.config.devices[i].name.clone();
+                        self.ticker.push(i, format!("{name} paired"), Tone::Good);
+                        self.flashes.insert(i, Instant::now());
                         (true, format!("Paired as node 0x{node_id:X}. Connecting…"))
                     }
                     Err(e) => (false, e),
@@ -251,7 +281,114 @@ impl App {
 
     /// Something is moving on screen (needs fast redraws).
     pub fn animating(&self) -> bool {
-        matches!(self.modal, Some(Modal { phase: Phase::Working { .. }, .. }))
+        if matches!(self.modal, Some(Modal { phase: Phase::Working { .. }, .. })) {
+            return true;
+        }
+        if !self.motion {
+            return false;
+        }
+        let now = Instant::now();
+        let sweep_end = self.epoch + motion::SWEEP_STAGGER * self.rooms.len() as u32 + motion::SWEEP;
+        now < sweep_end
+            || self.tweens.values().any(|t| !t.done(now))
+            || self.flashes.values().any(|&f| now.saturating_duration_since(f) < motion::FLASH)
+            || self.devices.iter().any(|d| d.status == Status::Connecting)
+    }
+
+    /// Slow ambient motion (breathing lights, heating) wants a modest
+    /// frame rate even when nothing else is happening.
+    pub fn ambient(&self) -> bool {
+        self.motion
+            && self.config.devices.iter().zip(&self.devices).any(|(c, d)| {
+                let on = |m| d.current.get(&m).copied().flatten().is_some_and(|v| v != 0.0);
+                (c.kind == DeviceKind::Plug && on(Metric::On)) || on(Metric::Running)
+            })
+    }
+
+    /// The value to display for a metric: mid-tween if animating.
+    pub fn shown(&self, device: usize, metric: Metric) -> Option<f64> {
+        let v = self.devices[device].current.get(&metric).copied().flatten();
+        match self.tweens.get(&(device, metric)) {
+            Some(t) if self.motion && v.is_some() => Some(t.value(Instant::now())),
+            _ => v,
+        }
+    }
+
+    /// 1 → 0 over the flash after a device reports.
+    pub fn flash(&self, device: usize) -> f64 {
+        match self.flashes.get(&device) {
+            Some(&at) if self.motion => 1.0 - motion::progress(at, motion::FLASH, Instant::now()),
+            _ => 0.0,
+        }
+    }
+
+    /// 0 → 1 reveal of a room during the startup sweep.
+    pub fn reveal(&self, room: usize) -> f64 {
+        if !self.motion {
+            return 1.0;
+        }
+        let start = self.epoch + motion::SWEEP_STAGGER * room as u32;
+        motion::ease_out_cubic(motion::progress(start, motion::SWEEP, Instant::now()))
+    }
+
+    /// Start tweens/flashes and record ticker events for an incoming update.
+    fn note_update(&mut self, i: usize, update: &DeviceUpdate) {
+        let now = Instant::now();
+        let name = self.config.devices[i].name.clone();
+        let d = &self.devices[i];
+        match update {
+            DeviceUpdate::Reading { metric, value } => {
+                let old = d.current.get(metric).copied().flatten();
+                self.flashes.insert(i, now);
+                if let (Some(new), Some(old)) = (value, old)
+                    && (new - old).abs() > f64::EPSILON
+                {
+                    // Tween from wherever the display currently is.
+                    let from = self.shown(i, *metric).unwrap_or(old);
+                    self.tweens.insert((i, *metric), Tween { from, to: *new, start: now });
+                }
+                match (metric, value, old) {
+                    (Metric::On, Some(v), Some(o)) if (v != &0.0) != (o != 0.0) => {
+                        let on = *v != 0.0;
+                        self.ticker.push(i, format!("{name} {}", if on { "on" } else { "off" }), if on { Tone::Glow } else { Tone::Normal });
+                    }
+                    (Metric::Running, Some(v), Some(o)) if (*v as u64 & 1) != (o as u64 & 1) => {
+                        let heating = *v as u64 & 1 != 0;
+                        self.ticker.push(i, format!("{name} heating {}", if heating { "on" } else { "off" }), if heating { Tone::Heat } else { Tone::Normal });
+                    }
+                    (Metric::Temperature, Some(v), _) => {
+                        // Announce moves of half a degree or more, not every wobble.
+                        match self.announced.get(&i).copied() {
+                            None => {
+                                self.announced.insert(i, *v);
+                            }
+                            Some(last) if (v - last).abs() >= 0.5 => {
+                                let arrow = if *v > last { "↑" } else { "↓" };
+                                let text = format!("{name} {} {arrow}", super::widgets::fmt_temp_unit(self.config.ui.temperature_unit, *v));
+                                self.ticker.push(i, text, Tone::Normal);
+                                self.announced.insert(i, *v);
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            DeviceUpdate::Status(new) => match (&d.status, new) {
+                (Status::Live { .. } | Status::Reconnecting { .. }, Status::Offline { .. }) => {
+                    self.ticker.push(i, format!("{name} offline"), Tone::Bad);
+                    self.lost.insert(i);
+                }
+                (_, Status::Live { .. }) if self.lost.remove(&i) => {
+                    self.ticker.push(i, format!("{name} back online"), Tone::Good);
+                }
+                _ => {}
+            },
+            DeviceUpdate::Info(_) => {}
+        }
+        // Drop finished animations so `animating()` goes quiet.
+        self.tweens.retain(|_, t| !t.done(now));
+        self.flashes.retain(|_, &mut at| now.saturating_duration_since(at) < motion::FLASH);
     }
 
     fn open_modal(&mut self, kind: ModalKind) {
@@ -334,6 +471,10 @@ impl App {
             KeyCode::Char('U') => self.open_modal(ModalKind::Unpair),
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.show_help = !self.show_help,
+            KeyCode::Char('m') => {
+                self.motion = !self.motion;
+                tracing::info!("motion {}", if self.motion { "on" } else { "off" });
+            }
             KeyCode::Esc if self.show_help => self.show_help = false,
             KeyCode::Char('`') => {
                 self.log_open = !self.log_open;

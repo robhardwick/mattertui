@@ -81,6 +81,10 @@ impl Theme {
     pub fn glow(&self) -> Color {
         self.pick((255, 200, 87), Color::Yellow)
     }
+    /// Peak of the "breathing" glow for lights that are on.
+    pub fn glow_bright(&self) -> Color {
+        self.pick((255, 241, 196), Color::LightYellow)
+    }
     pub fn heat(&self) -> Color {
         self.pick((255, 112, 67), Color::LightRed)
     }

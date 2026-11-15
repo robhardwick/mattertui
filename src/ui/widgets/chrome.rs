@@ -11,6 +11,7 @@ use super::current;
 use crate::config::DeviceKind;
 use crate::state::Metric;
 use crate::ui::app::App;
+use crate::ui::icons;
 
 pub fn top_bar(app: &App, area: Rect, buf: &mut Buffer) {
     let t = &app.theme;
@@ -26,7 +27,7 @@ pub fn top_bar(app: &App, area: Rect, buf: &mut Buffer) {
         Span::styled("● ", Style::new().fg(if live == total { t.good() } else { t.warn() })),
         Span::styled(format!("{live}/{total} live"), t.muted()),
         Span::styled("  ", t.muted()),
-        Span::styled(if t.ascii { "* " } else { "☼ " }, Style::new().fg(if lights_on > 0 { t.glow() } else { t.dim() })),
+        Span::styled(format!("{} ", icons::cell("lamp", t.ascii)), Style::new().fg(if lights_on > 0 { t.glow() } else { t.dim() })),
         Span::styled(format!("{lights_on} on"), t.muted()),
     ];
     let unseen = app.unseen_warnings();
@@ -105,6 +106,7 @@ const HELP: &[(&str, &str)] = &[
     ("←↓↑→ / hjkl", "move between devices"),
     ("Enter", "device detail (Esc to go back)"),
     ("[ ]", "chart range"),
+    ("m", "toggle motion"),
     ("p", "pair the selected device"),
     ("U", "unpair the selected device"),
     ("`", "toggle log panel"),
@@ -132,4 +134,61 @@ pub fn help(app: &App, area: Rect, buf: &mut Buffer) {
         ])
         .render(Rect::new(inner.x, inner.y + 1 + i as u16, inner.width, 1), buf);
     }
+}
+
+/// One line of recent events, newest first. Scrolls like a marquee when it
+/// doesn't fit (and motion is on). Returns whether it is scrolling.
+pub fn ticker(app: &App, area: Rect, buf: &mut Buffer) -> bool {
+    use crate::ui::motion::Tone;
+    let t = &app.theme;
+    if area.width == 0 {
+        return false;
+    }
+    if app.ticker.is_empty() {
+        Line::styled(" watching for changes…", Style::new().fg(t.faint())).render(area, buf);
+        return false;
+    }
+    let mut spans = vec![Span::raw(" ")];
+    for (n, e) in app.ticker.events().enumerate() {
+        if n > 0 {
+            spans.push(Span::styled("   ·   ", Style::new().fg(t.faint())));
+        }
+        let cfg = &app.config.devices[e.device];
+        let glyph = icons::glyph(cfg.icon.as_ref().map(|i| i.get_ref().as_str()), icons::default_for(cfg.kind), t.ascii);
+        let colour = match e.tone {
+            Tone::Normal => t.fg(),
+            Tone::Glow => t.glow(),
+            Tone::Heat => t.heat(),
+            Tone::Good => t.good(),
+            Tone::Bad => t.bad(),
+        };
+        spans.push(Span::raw(format!("{glyph} ")));
+        spans.push(Span::styled(e.text.clone(), Style::new().fg(colour)));
+        spans.push(Span::styled(format!(" {}", super::ago(e.at)), Style::new().fg(t.faint())));
+    }
+    let line = Line::from(spans);
+    let width = line.width() as u16;
+    if width <= area.width || !app.motion {
+        line.render(area, buf);
+        return false;
+    }
+
+    // Marquee: render the line plus a gap once, then copy a window that
+    // advances with time, wrapping around.
+    const GAP: u16 = 8;
+    const COLS_PER_SEC: f64 = 7.0;
+    let period = width + GAP;
+    let mut strip = Buffer::empty(Rect::new(0, 0, period, 1));
+    line.render(Rect::new(0, 0, width, 1), &mut strip);
+    let offset = (app.epoch.elapsed().as_secs_f64() * COLS_PER_SEC) as u64 % u64::from(period);
+    for x in 0..area.width {
+        let src = ((offset + u64::from(x)) % u64::from(period)) as u16;
+        let mut cell = strip[(src, 0)].clone();
+        // A wide glyph in the last column would spill off the line.
+        if x == area.width - 1 && Span::raw(cell.symbol()).width() > 1 {
+            cell.set_symbol(" ");
+        }
+        buf[(area.x + x, area.y)] = cell;
+    }
+    true
 }

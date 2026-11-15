@@ -14,6 +14,7 @@ use crate::state::{Metric, unix_minute};
 use crate::ui::app::{App, Health};
 use crate::ui::icons;
 use crate::ui::layout::Variant;
+use crate::ui::motion::mix;
 use crate::ui::series;
 
 pub fn render(app: &App, device: usize, variant: Variant, accent: Color, area: Rect, buf: &mut Buffer) {
@@ -45,13 +46,15 @@ fn frame(app: &App, device: usize, accent: Color, selected: bool, area: Rect, bu
     let health = app.health(device);
 
     let icon_colour = match cfg.kind {
-        DeviceKind::Plug if current(d, Metric::On) == Some(1.0) => t.glow(),
+        DeviceKind::Plug if current(d, Metric::On) == Some(1.0) => super::glow(app),
         _ => accent,
     };
+    // Selected tiles wear their room's accent; others flash it briefly
+    // when the device reports.
     let border = if selected {
         Style::new().fg(accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(t.border())
+        Style::new().fg(mix(t.border(), accent, app.flash(device)))
     };
     let name_style = if selected { t.bold(t.fg()) } else { t.text() };
     let mut block = Block::bordered()
@@ -93,7 +96,7 @@ fn plug(app: &App, device: usize, inner: Rect, buf: &mut Buffer) {
     let t = &app.theme;
     let d = &app.devices[device];
     let (text, colour) = match current(d, Metric::On) {
-        Some(v) if v != 0.0 => ("ON", t.glow()),
+        Some(v) if v != 0.0 => ("ON", super::glow(app)),
         Some(_) => ("OFF", t.dim()),
         None => ("—", t.dim()),
     };
@@ -111,9 +114,9 @@ fn sensor(app: &App, device: usize, inner: Rect, buf: &mut Buffer) {
     let d = &app.devices[device];
     temperature_line(app, device, row(inner, 0), buf);
     battery(app, device, row(inner, 0), buf);
-    if let Some(h) = current(d, Metric::Humidity) {
+    if let Some(h) = app.shown(device, Metric::Humidity) {
         Line::from(vec![
-            Span::styled(if t.ascii { "% " } else { "≈ " }, Style::new().fg(t.humidity(h))),
+            Span::styled(format!("{} ", icons::cell("humidity", t.ascii)), Style::new().fg(t.humidity(h))),
             Span::styled(format!("{h:.0}%"), value_style(app, device, t.humidity(h))),
         ])
         .render(row(inner, 1), buf);
@@ -137,7 +140,7 @@ fn featured(app: &App, device: usize, inner: Rect, buf: &mut Buffer) {
     let kind = app.config.devices[device].kind;
 
     // Big readout on the left, details on the right.
-    let temp = current(d, Metric::Temperature);
+    let temp = app.shown(device, Metric::Temperature);
     let big = temp.map_or("--.-".into(), |c| fmt_temp(app, c).trim_end_matches('°').to_string());
     let colour = temp.map_or(t.dim(), |c| t.temperature(c));
     let big_w = (big.chars().count() as u16) * 4;
@@ -166,8 +169,9 @@ fn featured(app: &App, device: usize, inner: Rect, buf: &mut Buffer) {
             running_line(app, device, row(side, 2), buf);
         }
         _ => {
-            if let Some(h) = current(d, Metric::Humidity) {
-                Line::styled(format!("≈ {h:.0}%"), Style::new().fg(t.humidity(h))).render(row(side, 1), buf);
+            if let Some(h) = app.shown(device, Metric::Humidity) {
+                Line::styled(format!("{} {h:.0}%", icons::cell("humidity", t.ascii)), Style::new().fg(t.humidity(h)))
+                    .render(row(side, 1), buf);
             }
         }
     }
@@ -236,13 +240,15 @@ pub fn temperature_chart(app: &App, device: usize, area: Rect, buf: &mut Buffer,
 fn temperature_line(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     let t = &app.theme;
     let d = &app.devices[device];
-    match current(d, Metric::Temperature) {
+    let icon = |c: Color| Span::styled(format!("{} ", icons::cell("thermometer", t.ascii)), Style::new().fg(c));
+    match app.shown(device, Metric::Temperature) {
         Some(c) => Line::from(vec![
+            icon(t.temperature(c)),
             Span::styled(fmt_temp(app, c), value_style(app, device, t.temperature(c))),
             Span::styled(format!(" {}", trend(d.history.get(&Metric::Temperature), c, unix_minute())), t.muted()),
         ])
         .render(area, buf),
-        None => Line::styled("—", t.muted()).render(area, buf),
+        None => Line::from(vec![icon(t.dim()), Span::styled("—", t.muted())]).render(area, buf),
     }
 }
 
@@ -251,15 +257,18 @@ fn setpoint_line(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     let d = &app.devices[device];
     let mode = current(d, Metric::Mode).map(|m| m as u8);
     let mut spans = vec![];
-    if let Some(sp) = current(d, Metric::HeatSetpoint)
+    if let Some(sp) = app.shown(device, Metric::HeatSetpoint)
         && mode != Some(3)
     {
         spans.push(Span::styled(format!("→ {}", fmt_temp(app, sp)), Style::new().fg(t.heat())));
     }
-    if let Some(sp) = current(d, Metric::CoolSetpoint)
+    if let Some(sp) = app.shown(device, Metric::CoolSetpoint)
         && matches!(mode, Some(1 | 3))
     {
-        spans.push(Span::styled(format!("  ❄ {}", fmt_temp(app, sp)), Style::new().fg(t.cool())));
+        spans.push(Span::styled(
+            format!("  {} {}", icons::cell("cool", t.ascii), fmt_temp(app, sp)),
+            Style::new().fg(t.cool()),
+        ));
     }
     Line::from(spans).render(area, buf);
     if let Some(m) = mode {
@@ -271,11 +280,11 @@ fn running_line(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     let t = &app.theme;
     let running = current(&app.devices[device], Metric::Running).map_or(0, |r| r as u64);
     let (text, colour) = if running & 0b001 != 0 {
-        (if t.ascii { "~ heating" } else { "♨ heating" }, t.heat())
+        (format!("{} heating", icons::cell("fire", t.ascii)), super::flame(app))
     } else if running & 0b010 != 0 {
-        (if t.ascii { "* cooling" } else { "❄ cooling" }, t.cool())
+        (format!("{} cooling", icons::cell("cool", t.ascii)), t.cool())
     } else {
-        ("idle", t.dim())
+        ("idle".to_string(), t.dim())
     };
     Line::styled(text, Style::new().fg(colour)).render(area, buf);
 }
@@ -284,7 +293,7 @@ fn battery_span(app: &App, device: usize) -> Option<Span<'static>> {
     let t = &app.theme;
     let b = current(&app.devices[device], Metric::Battery)?;
     let colour = if b < 20.0 { t.bad() } else { t.dim() };
-    Some(Span::styled(format!("{}{b:.0}%", if t.ascii { "bat " } else { "▮ " }), Style::new().fg(colour)))
+    Some(Span::styled(format!("{} {b:.0}%", icons::cell("battery", t.ascii)), Style::new().fg(colour)))
 }
 
 fn battery(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
@@ -319,15 +328,15 @@ fn compact(app: &App, device: usize, accent: Color, selected: bool, area: Rect, 
     let value = match (app.health(device), cfg.kind) {
         (Health::Unpaired, _) => Span::styled("not paired", t.muted()),
         (h @ (Health::Offline | Health::Connecting | Health::Reconnecting), _) if d.current.is_empty() => {
-            let (text, c) = health_badge(app, h).unwrap_or(("", t.dim()));
+            let (text, c) = health_badge(app, h).unwrap_or((String::new(), t.dim()));
             Span::styled(text, Style::new().fg(c))
         }
         (_, DeviceKind::Plug) => match current(d, Metric::On) {
-            Some(v) if v != 0.0 => Span::styled("ON", value_style(app, device, t.glow())),
+            Some(v) if v != 0.0 => Span::styled("ON", value_style(app, device, super::glow(app))),
             Some(_) => Span::styled("off", t.muted()),
             None => Span::styled("—", t.muted()),
         },
-        _ => match current(d, Metric::Temperature) {
+        _ => match app.shown(device, Metric::Temperature) {
             Some(c) => Span::styled(fmt_temp(app, c), value_style(app, device, t.temperature(c))),
             None => Span::styled("—", t.muted()),
         },

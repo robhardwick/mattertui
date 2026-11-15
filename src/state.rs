@@ -74,8 +74,6 @@ pub struct DeviceInfo {
     pub firmware: Option<String>,
     pub transport: Transport,
     pub endpoint: u16,
-    /// `Some` for intermittently connected (battery) devices.
-    pub icd: Option<IcdInfo>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -85,13 +83,6 @@ pub enum Transport {
     WiFi,
     Thread,
     Ethernet,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IcdInfo {
-    pub long_idle_time: bool,
-    pub check_in: bool,
-    pub idle_mode_s: Option<u32>,
 }
 
 /// Everything the UI knows about one configured device.

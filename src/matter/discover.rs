@@ -7,12 +7,11 @@ use matter_controller::ReadPath;
 use super::decode::{self, Report};
 use super::readonly::ReadOnlyNode;
 use crate::config::DeviceKind;
-use crate::state::{DeviceInfo, IcdInfo, Transport};
+use crate::state::{DeviceInfo, Transport};
 
 pub const BASIC_INFORMATION: u32 = 0x0028;
 pub const DESCRIPTOR: u32 = 0x001D;
 pub const NETWORK_COMMISSIONING: u32 = 0x0031;
-pub const ICD_MANAGEMENT: u32 = 0x0046;
 pub const ON_OFF: u32 = 0x0006;
 pub const THERMOSTAT: u32 = 0x0201;
 pub const TEMPERATURE: u32 = 0x0402;
@@ -43,8 +42,6 @@ pub async fn discover(
             ReadPath::new(None, Some(DESCRIPTOR), Some(DEVICE_TYPE_LIST)),
             ReadPath::new(None, Some(DESCRIPTOR), Some(SERVER_LIST)),
             ReadPath::new(None, Some(NETWORK_COMMISSIONING), Some(FEATURE_MAP)),
-            ReadPath::concrete(0, ICD_MANAGEMENT, FEATURE_MAP),
-            ReadPath::concrete(0, ICD_MANAGEMENT, 0x0000), // IdleModeDuration
         ])
         .await?;
 
@@ -111,15 +108,6 @@ pub async fn discover(
         firmware: s(0x000A),
         transport: transport(&report),
         endpoint,
-        icd: decode::find(&report, 0, ICD_MANAGEMENT, FEATURE_MAP)
-            .and_then(decode::as_u64)
-            .map(|f| IcdInfo {
-                check_in: f & 0b001 != 0,
-                long_idle_time: f & 0b100 != 0,
-                idle_mode_s: decode::find(&report, 0, ICD_MANAGEMENT, 0x0000)
-                    .and_then(decode::as_u64)
-                    .and_then(|v| u32::try_from(v).ok()),
-            }),
     };
     Ok(Discovery { info, paths })
 }

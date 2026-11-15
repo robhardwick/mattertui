@@ -3,6 +3,7 @@
 pub mod app;
 pub mod icons;
 pub mod layout;
+pub mod motion;
 pub mod series;
 pub mod theme;
 pub mod widgets;
@@ -188,9 +189,11 @@ async fn event_loop(
         if let Some(action) = app.action.take() {
             rt.start(app, action);
         }
-        // Clock, "ago" labels and staleness need a redraw even when idle;
-        // spinners need it often.
+        // Smooth while animating, gentle for ambient motion, and once a
+        // second otherwise (clock, "ago" labels, staleness).
         let wait = if app.animating() {
+            Duration::from_millis(33)
+        } else if app.ambient() || app.ticker_scrolling {
             Duration::from_millis(100)
         } else {
             Duration::from_secs(1)
@@ -222,14 +225,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         0
     };
-    let [top, body, log] =
+    let [top, body, ticker, log] =
         Rect::new(area.x, area.y, area.width, area.height).layout(&ratatui::layout::Layout::vertical([
             Constraint::Length(1),
             Constraint::Fill(1),
+            Constraint::Length(1),
             Constraint::Length(log_height),
         ]));
     let buf = frame.buffer_mut();
     chrome::top_bar(app, top, buf);
+    app.ticker_scrolling = chrome::ticker(app, ticker, buf);
     match app.view {
         View::Dashboard => dashboard(app, body, buf),
         View::Detail => detail::render(app, body, buf),
@@ -265,6 +270,24 @@ fn dashboard(app: &mut App, body: Rect, buf: &mut Buffer) {
         let device = app.device_at(t.room, t.tile);
         tile::render(app, device, t.variant, room::accent(app, t.room), t.rect, &mut off);
     }
+    // Startup: rooms sweep in left to right, one after another, behind a
+    // bright scan line in the room's accent colour.
+    for r in &app.layout.rooms {
+        let p = app.reveal(r.room);
+        if p >= 1.0 {
+            continue;
+        }
+        let edge = r.rect.x + (p * f64::from(r.rect.width)).round() as u16;
+        let accent = room::accent(app, r.room);
+        for y in r.rect.top()..r.rect.bottom() {
+            for x in edge..r.rect.right() {
+                off[(x, y)].reset();
+            }
+            if edge < r.rect.right() {
+                off[(edge, y)].set_char('▏').set_fg(accent);
+            }
+        }
+    }
     for y in 0..body.height {
         for x in 0..body.width {
             buf[(body.x + x, body.y + y)] = off[(x, y + app.scroll)].clone();
@@ -281,7 +304,7 @@ fn dashboard(app: &mut App, body: Rect, buf: &mut Buffer) {
 #[cfg(test)]
 mod tests_support {
     use super::*;
-    use crate::state::{DeviceInfo, IcdInfo, Metric, Transport, unix_minute};
+    use crate::state::{DeviceInfo, Metric, Transport, unix_minute};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -347,14 +370,13 @@ icon = "plug"
         let mut app = App::new(config, LogBuffer::new(), Theme { truecolor: true, ascii: false });
         let now = unix_minute();
         let live = Status::Live { max_interval_s: 60 };
-        let info = |transport, icd| DeviceInfo {
+        let info = |transport| DeviceInfo {
             node_id: 2,
             vendor: Some("Acme".into()),
             product: Some("Gadget".into()),
             firmware: Some("1.0".into()),
             transport,
             endpoint: 1,
-            icd,
         };
         let set = |app: &mut App, i: usize, m: Metric, f: &dyn Fn(i64) -> f64| {
             let h = app.devices[i].history.entry(m).or_insert_with(|| crate::state::History::new(1440));
@@ -366,22 +388,24 @@ icon = "plug"
         for i in 0..6 {
             app.devices[i].status = live.clone();
         }
-        app.devices[0].info = Some(info(Transport::WiFi, None));
+        app.devices[0].info = Some(info(Transport::WiFi));
         set(&mut app, 0, Metric::On, &|k| if k < 25 { 1.0 } else { 0.0 });
-        app.devices[1].info = Some(info(Transport::Thread, None));
+        app.devices[1].info = Some(info(Transport::Thread));
         set(&mut app, 1, Metric::Temperature, &|k| 19.0 + (60 - k) as f64 * 0.025);
         set(&mut app, 1, Metric::HeatSetpoint, &|_| 21.0);
         set(&mut app, 1, Metric::Running, &|k| if k < 40 { 1.0 } else { 0.0 });
         set(&mut app, 1, Metric::Mode, &|_| 4.0);
         set(&mut app, 2, Metric::Temperature, &|k| 20.5 + ((k as f64) / 9.0).sin() * 0.6);
         set(&mut app, 2, Metric::Humidity, &|_| 48.0);
-        app.devices[3].info = Some(info(Transport::Thread, Some(IcdInfo { long_idle_time: false, check_in: true, idle_mode_s: Some(300) })));
+        app.devices[3].info = Some(info(Transport::Thread));
         set(&mut app, 3, Metric::Temperature, &|k| 17.2 + (k as f64) * 0.01);
         set(&mut app, 3, Metric::Humidity, &|_| 55.0);
         set(&mut app, 3, Metric::Battery, &|_| 15.0);
         set(&mut app, 4, Metric::On, &|_| 1.0);
         app.devices[5].status = Status::Offline { error: "no route".into() };
         app.selected = 1;
+        // Snapshots must not depend on timing.
+        app.motion = false;
         app
     }
 
@@ -554,5 +578,77 @@ mod pairing_tests {
         key(&mut app, KeyCode::Char('p'));
         type_str(&mut app, "3497-011-2");
         insta::assert_snapshot!(stable(render(&mut app, 100, 30)));
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::tests_support::*;
+    use crate::state::{AppEvent, DeviceUpdate, Metric, Status};
+
+    fn reading(app: &mut super::App, id: &str, metric: Metric, v: f64) {
+        app.on_app_event(AppEvent::Device {
+            id: id.into(),
+            update: DeviceUpdate::Reading { metric, value: Some(v) },
+        });
+    }
+
+    #[test]
+    fn readings_tween_and_flash_when_motion_is_on() {
+        let mut app = fake_app();
+        app.motion = true;
+        let before = app.shown(3, Metric::Temperature).unwrap();
+        reading(&mut app, "bedside", Metric::Temperature, before + 3.0);
+        let mid = app.shown(3, Metric::Temperature).unwrap();
+        assert!(mid >= before && mid < before + 3.0, "starts near the old value: {mid}");
+        assert!(app.flash(3) > 0.9);
+        assert!(app.animating());
+
+        app.motion = false;
+        assert_eq!(app.shown(3, Metric::Temperature), Some(before + 3.0));
+        assert_eq!(app.flash(3), 0.0);
+    }
+
+    #[test]
+    fn ticker_records_notable_changes_only() {
+        let mut app = fake_app();
+        reading(&mut app, "lamp", Metric::On, 0.0); // was on
+        reading(&mut app, "bedside", Metric::Temperature, 17.3); // small wobble: first sample
+        reading(&mut app, "bedside", Metric::Temperature, 17.4); // still small
+        reading(&mut app, "bedside", Metric::Temperature, 18.0); // ≥ 0.5 from 17.3
+        app.on_app_event(AppEvent::Device { id: "heating".into(), update: DeviceUpdate::Status(Status::Offline { error: "x".into() }) });
+        app.on_app_event(AppEvent::Device { id: "heating".into(), update: DeviceUpdate::Status(Status::Connecting) });
+        app.on_app_event(AppEvent::Device { id: "heating".into(), update: DeviceUpdate::Status(Status::Live { max_interval_s: 60 }) });
+        let texts: Vec<_> = app.ticker.events().map(|e| e.text.clone()).collect();
+        assert_eq!(
+            texts,
+            ["Heating back online", "Heating offline", "Bedside 18.0° ↑", "Floor lamp off"]
+        );
+    }
+
+    #[test]
+    fn startup_sweep_reveals_rooms_in_turn() {
+        let mut app = fake_app();
+        app.motion = true;
+        app.epoch = std::time::Instant::now();
+        assert!(app.reveal(0) < 1.0);
+        assert!(app.reveal(2) <= app.reveal(0));
+        app.epoch -= std::time::Duration::from_secs(5);
+        assert_eq!(app.reveal(2), 1.0);
+    }
+
+    #[test]
+    fn long_ticker_scrolls_only_with_motion() {
+        let mut app = fake_app();
+        for _ in 0..10 {
+            reading(&mut app, "lamp", Metric::On, 1.0);
+            reading(&mut app, "lamp", Metric::On, 0.0);
+        }
+        render(&mut app, 80, 24);
+        assert!(!app.ticker_scrolling);
+        app.motion = true;
+        app.epoch -= std::time::Duration::from_secs(10); // past the startup sweep
+        render(&mut app, 80, 24);
+        assert!(app.ticker_scrolling);
     }
 }

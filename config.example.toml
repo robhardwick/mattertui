@@ -3,6 +3,13 @@
 # Rooms and devices appear in the order they are declared; the dashboard
 # lays them out automatically. Pair a device with:
 #   mattertui pair <device-id> <setup-code>
+#
+# Icons (for rooms and devices), shown as emoji:
+#   lamp bulb plug fan tv thermostat thermometer humidity battery fire cool
+#   home sofa bed moon sun kitchen bath office desk garden tree teddy games
+#   books garage star heart snow
+# Or give a single emoji directly, e.g. icon = "🎸". Prefer emoji that show
+# as emoji by default; ones like ☀ or ❄ can misalign in tmux.
 
 [ui]
 temperature_unit = "celsius"   # celsius | fahrenheit

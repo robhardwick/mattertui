@@ -9,16 +9,22 @@ pub mod tile;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use std::time::{Duration, Instant};
+
 use ratatui::style::{Color, Style};
 
 use super::app::{App, Health};
-use super::series;
+use super::{motion, series};
 use crate::config::TemperatureUnit;
 use crate::state::{DeviceState, History, Metric};
 
 /// "21.5°" in the configured unit.
 pub fn fmt_temp(app: &App, celsius: f64) -> String {
-    match app.config.ui.temperature_unit {
+    fmt_temp_unit(app.config.ui.temperature_unit, celsius)
+}
+
+pub fn fmt_temp_unit(unit: TemperatureUnit, celsius: f64) -> String {
+    match unit {
         TemperatureUnit::Celsius => format!("{celsius:.1}°"),
         TemperatureUnit::Fahrenheit => format!("{:.1}°", celsius * 9.0 / 5.0 + 32.0),
     }
@@ -40,15 +46,47 @@ pub fn trend(h: Option<&History>, now: f64, now_min: i64) -> &'static str {
     }
 }
 
-pub fn health_badge(app: &App, h: Health) -> Option<(&'static str, Color)> {
+/// Warm light that gently breathes while motion is on.
+pub fn glow(app: &App) -> Color {
+    let t = &app.theme;
+    if !app.motion {
+        return t.glow();
+    }
+    let b = motion::breathe(app.epoch, Duration::from_millis(3200), Instant::now());
+    motion::mix(t.glow(), t.glow_bright(), b * 0.7)
+}
+
+/// Flickering flame colour for active heating.
+pub fn flame(app: &App) -> Color {
+    let t = &app.theme;
+    if !app.motion {
+        return t.heat();
+    }
+    let now = Instant::now();
+    // Two incommensurate waves read as an irregular flicker.
+    let f = 0.65 * motion::breathe(app.epoch, Duration::from_millis(1300), now)
+        + 0.35 * motion::breathe(app.epoch, Duration::from_millis(370), now);
+    motion::mix(t.heat(), t.glow(), f)
+}
+
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub fn spinner(app: &App) -> &'static str {
+    if app.theme.ascii || !app.motion {
+        return "…";
+    }
+    SPINNER[(app.epoch.elapsed().as_millis() / 90) as usize % SPINNER.len()]
+}
+
+pub fn health_badge(app: &App, h: Health) -> Option<(String, Color)> {
     let t = &app.theme;
     Some(match h {
         Health::Live => return None,
-        Health::Unpaired => ("not paired", t.dim()),
-        Health::Connecting => ("connecting…", t.dim()),
-        Health::Stale => ("stale", t.warn()),
-        Health::Reconnecting => ("↻", t.faint()),
-        Health::Offline => ("offline", t.bad()),
+        Health::Unpaired => ("not paired".into(), t.dim()),
+        Health::Connecting => (format!("{} connecting", spinner(app)), t.dim()),
+        Health::Stale => ("stale".into(), t.warn()),
+        Health::Reconnecting => ("↻".into(), t.faint()),
+        Health::Offline => ("offline".into(), t.bad()),
     })
 }
 
