@@ -49,12 +49,23 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
             format!("{} {}", info.vendor.as_deref().unwrap_or("?"), info.product.as_deref().unwrap_or("?")),
             t.text(),
         ));
-        let rest = vec![
+        let mut rest = vec![
             info.firmware.as_ref().map(|f| format!("fw {f}")),
             Some(transport_name(info.transport).to_string()).filter(|s| !s.is_empty()),
             Some(format!("node 0x{:X}", info.node_id)),
             Some(format!("endpoint {}", info.endpoint)),
         ];
+        if let Some(th) = info.thermostat {
+            rest.push(Some(
+                match (th.can_heat, th.can_cool) {
+                    (true, false) => "heating only",
+                    (false, true) => "cooling only",
+                    _ => "heating and cooling",
+                }
+                .to_string(),
+            ));
+            rest.push(th.heat_limits.map(|(lo, hi)| format!("setpoint {}–{}", fmt_temp(app, lo), fmt_temp(app, hi))));
+        }
         for s in rest.into_iter().flatten() {
             facts.push(Span::styled(format!("  ·  {s}"), t.muted()));
         }
@@ -103,7 +114,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
 
     // One section per metric with history.
     let body = Rect::new(inner.x, inner.y + 5, inner.width, inner.height.saturating_sub(5));
-    let charts: Vec<Metric> = [Metric::Temperature, Metric::Humidity, Metric::Battery]
+    let charts: Vec<Metric> = [Metric::Temperature, Metric::Humidity, Metric::HeatDemand, Metric::Battery]
         .into_iter()
         .filter(|m| d.history.contains_key(m))
         .collect();
@@ -130,6 +141,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         match m {
             Metric::Temperature => temperature_chart(app, i, chart, buf, true),
             Metric::Humidity => line_chart(app, i, m, chart, buf, |v| t.humidity(v), |v| format!("{v:.0}%")),
+            Metric::HeatDemand => line_chart(app, i, m, chart, buf, |_| t.heat(), |v| format!("{v:.0}%")),
             _ => line_chart(app, i, m, chart, buf, |_| t.dim(), |v| format!("{v:.0}%")),
         }
         y += chart_h;
@@ -154,6 +166,7 @@ fn section_title(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Buff
         Metric::Temperature => "Temperature",
         Metric::Humidity => "Humidity",
         Metric::Battery => "Battery",
+        Metric::HeatDemand => "Heating demand",
         Metric::On => "Power",
         Metric::Running => "Running",
         _ => "",
@@ -174,6 +187,9 @@ fn section_title(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Buff
                 _ => "",
             };
             spans.push(Span::styled(format!("  {label}"), t.muted()));
+            if m == Metric::Running && d.info.as_ref().and_then(|i| i.thermostat).is_some_and(|th| th.running_estimated) {
+                spans.push(Span::styled(" · estimated from temperature vs setpoint", t.muted()));
+            }
             if m == Metric::Running
                 && let Some(mode) = current(d, Metric::Mode)
             {

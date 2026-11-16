@@ -128,9 +128,12 @@ fn thermostat(app: &App, device: usize, inner: Rect, buf: &mut Buffer) {
     let t = &app.theme;
     let d = &app.devices[device];
     temperature_line(app, device, row(inner, 0), buf);
-    battery(app, device, row(inner, 0), buf);
+    if let Some(h) = humidity_span(app, device) {
+        Line::from(h).alignment(Alignment::Right).render(row(inner, 0), buf);
+    }
     setpoint_line(app, device, row(inner, 1), buf);
     running_line(app, device, row(inner, 2), buf);
+    battery(app, device, row(inner, 2), buf);
     sparkline(app, d, Metric::Temperature, row(inner, 3), buf, |v| t.temperature(v));
 }
 
@@ -165,13 +168,16 @@ fn featured(app: &App, device: usize, inner: Rect, buf: &mut Buffer) {
     }
     match kind {
         DeviceKind::Thermostat => {
+            if let Some(h) = humidity_span(app, device) {
+                Line::from(h).alignment(Alignment::Right).render(row(side, 0), buf);
+            }
             setpoint_line(app, device, row(side, 1), buf);
             running_line(app, device, row(side, 2), buf);
+            setpoint_gauge(app, device, Rect::new(inner.x + 1, inner.y + 4, inner.width.saturating_sub(2), 1), buf);
         }
         _ => {
-            if let Some(h) = app.shown(device, Metric::Humidity) {
-                Line::styled(format!("{} {h:.0}%", icons::cell("humidity", t.ascii)), Style::new().fg(t.humidity(h)))
-                    .render(row(side, 1), buf);
+            if let Some(h) = humidity_span(app, device) {
+                Line::from(h).render(row(side, 1), buf);
             }
         }
     }
@@ -252,17 +258,33 @@ fn temperature_line(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     }
 }
 
+/// Thermostat facts, if discovery has run.
+fn thermostat_info(app: &App, device: usize) -> Option<crate::state::ThermostatInfo> {
+    app.devices[device].info.as_ref().and_then(|i| i.thermostat)
+}
+
+fn mode(app: &App, device: usize) -> Option<u8> {
+    current(&app.devices[device], Metric::Mode).map(|m| m as u8)
+}
+
 fn setpoint_line(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     let t = &app.theme;
-    let d = &app.devices[device];
-    let mode = current(d, Metric::Mode).map(|m| m as u8);
+    let mode = mode(app, device);
+    let caps = thermostat_info(app, device);
+    let (can_heat, can_cool) = caps.map_or((true, true), |c| (c.can_heat, c.can_cool));
+    if mode == Some(0) {
+        Line::styled("off", t.muted()).render(area, buf);
+        return;
+    }
     let mut spans = vec![];
     if let Some(sp) = app.shown(device, Metric::HeatSetpoint)
+        && can_heat
         && mode != Some(3)
     {
         spans.push(Span::styled(format!("→ {}", fmt_temp(app, sp)), Style::new().fg(t.heat())));
     }
     if let Some(sp) = app.shown(device, Metric::CoolSetpoint)
+        && can_cool
         && matches!(mode, Some(1 | 3))
     {
         spans.push(Span::styled(
@@ -271,29 +293,104 @@ fn setpoint_line(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
         ));
     }
     Line::from(spans).render(area, buf);
-    if let Some(m) = mode {
+    // "heat" on a heating-only device says nothing; other modes do.
+    if let Some(m) = mode
+        && !(m == 4 && !can_cool)
+    {
         Line::styled(system_mode(m), t.muted()).alignment(Alignment::Right).render(area, buf);
     }
 }
 
 fn running_line(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     let t = &app.theme;
-    let running = current(&app.devices[device], Metric::Running).map_or(0, |r| r as u64);
-    let (text, colour) = if running & 0b001 != 0 {
+    if mode(app, device) == Some(0) {
+        return;
+    }
+    let d = &app.devices[device];
+    let running = current(d, Metric::Running).map_or(0, |r| r as u64);
+    let demand = current(d, Metric::HeatDemand);
+    let (mut text, colour) = if running & 0b001 != 0 || demand.is_some_and(|p| p > 0.0) {
         (format!("{} heating", icons::cell("fire", t.ascii)), super::flame(app))
     } else if running & 0b010 != 0 {
         (format!("{} cooling", icons::cell("cool", t.ascii)), t.cool())
     } else {
         ("idle".to_string(), t.dim())
     };
+    if let Some(p) = demand.filter(|p| *p > 0.0) {
+        text.push_str(&format!(" {p:.0}%"));
+    }
     Line::styled(text, Style::new().fg(colour)).render(area, buf);
+}
+
+/// Where the temperature and setpoint sit between the setpoint limits:
+/// `5° ━━━━━━━●━━━━━◆────────── 30°`.
+fn setpoint_gauge(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
+    let t = &app.theme;
+    let (lo, hi) = thermostat_info(app, device).and_then(|i| i.heat_limits).unwrap_or((5.0, 30.0));
+    let lo_label = fmt_temp(app, lo).replace(".0°", "°");
+    let hi_label = fmt_temp(app, hi).replace(".0°", "°");
+    let track_x = area.x + lo_label.chars().count() as u16 + 1;
+    let track_w = area.width.saturating_sub(lo_label.chars().count() as u16 + hi_label.chars().count() as u16 + 2);
+    if track_w < 6 {
+        return;
+    }
+    Line::styled(lo_label, t.muted()).render(area, buf);
+    Line::styled(hi_label, t.muted()).alignment(Alignment::Right).render(area, buf);
+    let col = |v: f64| {
+        let f = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
+        track_x + (f * f64::from(track_w - 1)).round() as u16
+    };
+    let temp = app.shown(device, Metric::Temperature);
+    let filled_to = temp.map_or(track_x, col);
+    let (fill, empty, temp_mark, sp_mark) = if t.ascii { ('=', '-', 'o', '^') } else { ('━', '─', '●', '◆') };
+    for x in track_x..track_x + track_w {
+        let (g, c) = if x <= filled_to && temp.is_some() {
+            let v = lo + (hi - lo) * f64::from(x - track_x) / f64::from(track_w - 1);
+            (fill, t.temperature(v))
+        } else {
+            (empty, t.faint())
+        };
+        buf[(x, area.y)].set_char(g).set_style(Style::new().fg(c));
+    }
+    let last = track_x + track_w - 1;
+    let temp_col = temp.map(col);
+    if let Some(c) = temp {
+        buf[(col(c), area.y)].set_char(temp_mark).set_style(Style::new().fg(t.temperature(c)).add_modifier(Modifier::BOLD));
+    }
+    if mode(app, device) != Some(0)
+        && let Some(sp) = app.shown(device, Metric::HeatSetpoint)
+    {
+        // Keep both markers visible when they land in the same column.
+        let mut x = col(sp);
+        if temp_col == Some(x) {
+            let above = temp.is_some_and(|c| sp >= c);
+            x = if (above && x < last) || x == track_x { x + 1 } else { x - 1 };
+        }
+        buf[(x, area.y)].set_char(sp_mark).set_style(Style::new().fg(t.heat()).add_modifier(Modifier::BOLD));
+    }
 }
 
 fn battery_span(app: &App, device: usize) -> Option<Span<'static>> {
     let t = &app.theme;
-    let b = current(&app.devices[device], Metric::Battery)?;
-    let colour = if b < 20.0 { t.bad() } else { t.dim() };
-    Some(Span::styled(format!("{} {b:.0}%", icons::cell("battery", t.ascii)), Style::new().fg(colour)))
+    let d = &app.devices[device];
+    let icon = icons::cell("battery", t.ascii);
+    if let Some(b) = current(d, Metric::Battery) {
+        let colour = if b < 20.0 { t.bad() } else { t.dim() };
+        return Some(Span::styled(format!("{icon} {b:.0}%"), Style::new().fg(colour)));
+    }
+    // Devices without a percentage report a charge level instead.
+    let (text, colour) = match current(d, Metric::BatteryLevel)? as u8 {
+        0 => ("ok", t.dim()),
+        1 => ("low", t.warn()),
+        _ => ("replace", t.bad()),
+    };
+    Some(Span::styled(format!("{icon} {text}"), Style::new().fg(colour)))
+}
+
+fn humidity_span(app: &App, device: usize) -> Option<Span<'static>> {
+    let t = &app.theme;
+    let h = app.shown(device, Metric::Humidity)?;
+    Some(Span::styled(format!("{} {h:.0}%", icons::cell("humidity", t.ascii)), Style::new().fg(t.humidity(h))))
 }
 
 fn battery(app: &App, device: usize, area: Rect, buf: &mut Buffer) {

@@ -304,7 +304,7 @@ fn dashboard(app: &mut App, body: Rect, buf: &mut Buffer) {
 #[cfg(test)]
 mod tests_support {
     use super::*;
-    use crate::state::{DeviceInfo, Metric, Transport, unix_minute};
+    use crate::state::{DeviceInfo, Metric, ThermostatInfo, Transport, unix_minute};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -377,6 +377,7 @@ icon = "plug"
             firmware: Some("1.0".into()),
             transport,
             endpoint: 1,
+            thermostat: None,
         };
         let set = |app: &mut App, i: usize, m: Metric, f: &dyn Fn(i64) -> f64| {
             let h = app.devices[i].history.entry(m).or_insert_with(|| crate::state::History::new(1440));
@@ -390,7 +391,18 @@ icon = "plug"
         }
         app.devices[0].info = Some(info(Transport::WiFi));
         set(&mut app, 0, Metric::On, &|k| if k < 25 { 1.0 } else { 0.0 });
-        app.devices[1].info = Some(info(Transport::Thread));
+        // Like the tado° X: heating only, no running state (estimated).
+        app.devices[1].info = Some(DeviceInfo {
+            thermostat: Some(ThermostatInfo {
+                can_heat: true,
+                can_cool: false,
+                heat_limits: Some((5.0, 30.0)),
+                running_estimated: true,
+            }),
+            ..info(Transport::Thread)
+        });
+        set(&mut app, 1, Metric::Humidity, &|_| 54.0);
+        app.devices[1].current.insert(Metric::BatteryLevel, Some(0.0));
         set(&mut app, 1, Metric::Temperature, &|k| 19.0 + (60 - k) as f64 * 0.025);
         set(&mut app, 1, Metric::HeatSetpoint, &|_| 21.0);
         set(&mut app, 1, Metric::Running, &|k| if k < 40 { 1.0 } else { 0.0 });
@@ -650,5 +662,47 @@ mod motion_tests {
         app.epoch -= std::time::Duration::from_secs(10); // past the startup sweep
         render(&mut app, 80, 24);
         assert!(app.ticker_scrolling);
+    }
+}
+
+#[cfg(test)]
+mod thermostat_tests {
+    use super::tests_support::*;
+    use crate::state::{AppEvent, DeviceUpdate, Metric};
+
+    fn reading(app: &mut super::App, metric: Metric, v: f64) {
+        app.on_app_event(AppEvent::Device {
+            id: "heating".into(),
+            update: DeviceUpdate::Reading { metric, value: Some(v) },
+        });
+    }
+
+    #[test]
+    fn thermostat_tiles() {
+        let mut app = fake_app();
+        // Featured (with gauge), wide enough to show it.
+        insta::assert_snapshot!("featured", stable(render(&mut app, 130, 34)).lines().take(20).collect::<Vec<_>>().join("\n"));
+        app.config.devices[1].featured = false;
+        insta::assert_snapshot!("normal", stable(render(&mut app, 130, 34)).lines().take(14).collect::<Vec<_>>().join("\n"));
+    }
+
+    #[test]
+    fn off_thermostat_hides_setpoint_and_heating() {
+        let mut app = fake_app();
+        app.config.devices[1].featured = false;
+        reading(&mut app, Metric::Mode, 0.0);
+        let screen = render(&mut app, 130, 34);
+        assert!(screen.contains("off"));
+        assert!(!screen.contains("→ 21.0°"));
+        assert!(!screen.contains("heating"));
+    }
+
+    #[test]
+    fn ticker_announces_setpoint_and_mode_changes() {
+        let mut app = fake_app();
+        reading(&mut app, Metric::HeatSetpoint, 18.0);
+        reading(&mut app, Metric::Mode, 0.0);
+        let texts: Vec<_> = app.ticker.events().map(|e| e.text.clone()).collect();
+        assert_eq!(texts, ["Heating → off", "Heating set to 18.0°"]);
     }
 }

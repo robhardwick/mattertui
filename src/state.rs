@@ -23,12 +23,17 @@ pub enum Metric {
     Running,
     /// Battery %, 0–100.
     Battery,
+    /// Battery charge level for devices without a percentage:
+    /// 0 ok, 1 warning, 2 critical.
+    BatteryLevel,
+    /// Thermostat heating demand %, 0–100 (PIHeatingDemand).
+    HeatDemand,
 }
 
 impl Metric {
     /// Metrics that get a history ring (and so a graph).
     pub fn graphed(self) -> bool {
-        !matches!(self, Metric::Mode)
+        !matches!(self, Metric::Mode | Metric::BatteryLevel)
     }
 }
 
@@ -74,6 +79,20 @@ pub struct DeviceInfo {
     pub firmware: Option<String>,
     pub transport: Transport,
     pub endpoint: u16,
+    /// Present for thermostats.
+    pub thermostat: Option<ThermostatInfo>,
+}
+
+/// Fixed thermostat facts, read once at discovery.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThermostatInfo {
+    pub can_heat: bool,
+    pub can_cool: bool,
+    /// Heating setpoint limits, °C.
+    pub heat_limits: Option<(f64, f64)>,
+    /// The device reports neither running state nor heating demand, so
+    /// `Metric::Running` is estimated from temperature vs setpoint.
+    pub running_estimated: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

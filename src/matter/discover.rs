@@ -7,7 +7,7 @@ use matter_controller::ReadPath;
 use super::decode::{self, Report};
 use super::readonly::ReadOnlyNode;
 use crate::config::DeviceKind;
-use crate::state::{DeviceInfo, Transport};
+use crate::state::{DeviceInfo, ThermostatInfo, Transport};
 
 pub const BASIC_INFORMATION: u32 = 0x0028;
 pub const DESCRIPTOR: u32 = 0x001D;
@@ -62,18 +62,20 @@ pub async fn discover(
         main_cluster,
         match kind {
             DeviceKind::Plug => &[0x0000],
-            // LocalTemperature, Cooling/HeatingSetpoint, SystemMode, RunningState
-            DeviceKind::Thermostat => &[0x0000, 0x0011, 0x0012, 0x001C, 0x0029],
+            // LocalTemperature, PIHeatingDemand, Cooling/HeatingSetpoint,
+            // SystemMode, RunningState
+            DeviceKind::Thermostat => &[0x0000, 0x0008, 0x0011, 0x0012, 0x001C, 0x0029],
             DeviceKind::TemperatureSensor => &[0x0000],
         },
     )];
-    if kind == DeviceKind::TemperatureSensor
+    if kind != DeviceKind::Plug
         && let Some(ep) = first_with_server(&endpoints, HUMIDITY, endpoint)
     {
         wanted.push((ep, HUMIDITY, &[0x0000]));
     }
     if let Some(ep) = first_with_server(&endpoints, POWER_SOURCE, endpoint) {
-        wanted.push((ep, POWER_SOURCE, &[0x000C])); // BatPercentRemaining
+        // BatPercentRemaining, or BatChargeLevel on devices without a percentage.
+        wanted.push((ep, POWER_SOURCE, &[0x000C, 0x000E]));
     }
 
     let lists = node
@@ -84,14 +86,17 @@ pub async fn discover(
                 .collect::<Vec<_>>(),
         )
         .await?;
-    let mut paths = Vec::new();
-    for (ep, cluster, attrs) in &wanted {
-        let present: Vec<u64> = decode::find(&lists, *ep, *cluster, ATTRIBUTE_LIST)
+    let present = |ep: u16, cluster: u32| -> Vec<u64> {
+        decode::find(&lists, ep, cluster, ATTRIBUTE_LIST)
             .map(decode::elements)
             .unwrap_or_default()
             .into_iter()
             .filter_map(decode::as_u64)
-            .collect();
+            .collect()
+    };
+    let mut paths = Vec::new();
+    for (ep, cluster, attrs) in &wanted {
+        let present = present(*ep, *cluster);
         for &a in *attrs {
             // If the device didn't return an AttributeList, ask anyway.
             if present.is_empty() || present.contains(&u64::from(a)) {
@@ -99,6 +104,19 @@ pub async fn discover(
             }
         }
     }
+
+    let thermostat = if kind == DeviceKind::Thermostat {
+        let attrs = present(endpoint, THERMOSTAT);
+        let facts: Vec<ReadPath> = THERMOSTAT_FACTS
+            .iter()
+            .filter(|a| attrs.contains(&u64::from(**a)))
+            .map(|a| ReadPath::concrete(endpoint, THERMOSTAT, *a))
+            .collect();
+        let facts = if facts.is_empty() { Vec::new() } else { node.read(&facts).await? };
+        Some(thermostat_info(&facts, endpoint, &attrs))
+    } else {
+        None
+    };
 
     let s = |a| decode::find(&report, 0, BASIC_INFORMATION, a).and_then(decode::as_str).map(str::to_owned);
     let info = DeviceInfo {
@@ -108,8 +126,38 @@ pub async fn discover(
         firmware: s(0x000A),
         transport: transport(&report),
         endpoint,
+        thermostat,
     };
     Ok(Discovery { info, paths })
+}
+
+/// ControlSequenceOfOperation, then Min/MaxHeatSetpointLimit and their
+/// Abs variants (used when the device lacks the configurable ones).
+const THERMOSTAT_FACTS: &[u32] = &[0x001B, 0x0015, 0x0016, 0x0003, 0x0004];
+
+/// Thermostat capabilities from a read of [`THERMOSTAT_FACTS`] and the
+/// cluster's AttributeList (`attrs`).
+fn thermostat_info(facts: &Report, ep: u16, attrs: &[u64]) -> ThermostatInfo {
+    let get = |a| decode::find(facts, ep, THERMOSTAT, a);
+    // 0–1 cooling only, 2–3 heating only, 4–5 both. Missing → assume both.
+    let (can_heat, can_cool) = match get(0x001B).and_then(decode::as_u64) {
+        Some(0 | 1) => (false, true),
+        Some(2 | 3) => (true, false),
+        _ => (true, true),
+    };
+    let temp = |a| get(a).and_then(decode::centi_celsius);
+    let heat_limits = match (temp(0x0015).or(temp(0x0003)), temp(0x0016).or(temp(0x0004))) {
+        (Some(lo), Some(hi)) if hi > lo => Some((lo, hi)),
+        _ => None,
+    };
+    // With no AttributeList we subscribed to everything; don't guess.
+    let running_estimated = !attrs.is_empty() && !attrs.contains(&0x0029) && !attrs.contains(&0x0008);
+    ThermostatInfo {
+        can_heat,
+        can_cool,
+        heat_limits,
+        running_estimated,
+    }
 }
 
 struct Endpoint {
@@ -205,6 +253,32 @@ mod tests {
             device_types: device_types.to_vec(),
             servers: servers.to_vec(),
         }
+    }
+
+    /// The tado° Wireless Temperature Sensor X, as probed.
+    #[test]
+    fn tado_thermostat_facts() {
+        use matter_controller::{AttributePath, Value};
+        let at = |attribute| AttributePath { endpoint: 1, cluster: THERMOSTAT, attribute };
+        let facts = vec![
+            (at(0x001B), Value::Uint(2)),
+            (at(0x0003), Value::Int(500)),
+            (at(0x0004), Value::Int(3000)),
+        ];
+        let attrs = [0x0000, 0x0003, 0x0004, 0x0012, 0x001B, 0x001C, 0xFFFC, 0xFFFD, 0xFFF8, 0xFFF9, 0xFFFB];
+        let info = thermostat_info(&facts, 1, &attrs);
+        assert_eq!(
+            info,
+            ThermostatInfo {
+                can_heat: true,
+                can_cool: false,
+                heat_limits: Some((5.0, 30.0)),
+                running_estimated: true,
+            }
+        );
+        // A device that reports running state isn't estimated.
+        assert!(!thermostat_info(&facts, 1, &[0x0000, 0x0029]).running_estimated);
+        assert!(!thermostat_info(&[], 1, &[]).running_estimated);
     }
 
     #[test]

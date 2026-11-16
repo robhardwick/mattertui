@@ -428,15 +428,203 @@ The app code is identical on both platforms. Only OS-level network setup differs
 
 ## 10. Milestones
 
-1. **Spike** (on the Mac and then the Pi):
+1. **Spike** (done, on the Mac):
    - Build the real `paths`, `fetch-roots`, `pair` and `nodes` subcommands.
    - Pair one Wi-Fi plug and one battery Thread sensor, then **restart and
      confirm both reconnect with no code**.
-   - Read values and check the sensor's ICD type. If it's LIT, receive one
-     check-in.
-2. **Engine without UI:** config and `check`, workers, decoding, history,
-   `unpair`, single-instance lock. Readings are logged to stderr.
-3. **Static dashboard:** log panel (first, so the rest can be debugged in it), layout and snapshot tests, rooms, tiles, detail chart,
-   theme and fallback.
-4. **Pairing and unpairing in the TUI** (done). The ICD listener was not needed (see §5).
+   - Read values and check the sensor's ICD type.
+2. **Engine without UI** (done): config and `check`, workers, decoding,
+   history, `unpair`, single-instance lock.
+3. **Static dashboard** (done): log panel, layout and snapshot tests, rooms,
+   tiles, detail chart, theme and fallback.
+4. **Pairing and unpairing in the TUI** (done). The ICD listener was not
+   needed (see §5).
 5. **Motion** (done): frame clock, tweens, flashes, sweep, breathing, ticker.
+6. **Thermostats** (done, §11): validated against a tado° X; heating is
+   estimated because the device doesn't report it.
+7. **Visual refresh** (§12): btop-inspired graphs, panels that fill the
+   screen in both directions, one orange + teal palette, tighter alignment.
+
+---
+
+## 11. Milestone 6: Thermostats
+
+**Result (2026-11-16).** The tado° (it identifies as "Wireless Temperature
+Sensor X", fw 1.4.289) exposes only these thermostat attributes:
+LocalTemperature, Abs Min/Max HeatSetpointLimit (5–30 °C),
+OccupiedHeatingSetpoint, ControlSequenceOfOperation (heating only) and
+SystemMode. It's SIT (idle 120 s), with no check-in support, humidity on
+endpoint 2, and battery as BatChargeLevel only.
+
+What was built:
+- Humidity for thermostats.
+- Battery charge level as a fallback when there's no percentage
+  (ok / low / replace).
+- PIHeatingDemand, when present.
+- Capabilities and limits read once at discovery.
+- Heating **estimated** from temperature vs setpoint (on 0.2° below,
+  off 0.1° above) when neither running state nor demand is reported. The
+  detail view labels it as an estimate.
+- Heating-only devices hide cooling and the redundant "heat" mode.
+- A clear "off" state.
+- A setpoint gauge on featured tiles.
+- 🔥 in the room summary while heating.
+- Ticker entries for setpoint and mode changes.
+- `nodes --probe` dumps every Thermostat and PowerSource attribute.
+
+Not built, because the tado doesn't expose them: occupancy and unoccupied
+setpoints, outdoor temperature, running mode, setpoint change source, and
+presets. The probe will show them if a future device has them. Bridged
+thermostats are covered by the existing `endpoint` override.
+
+The original plan follows.
+
+**Already in place (untested on hardware):**
+- `kind = "thermostat"`.
+- Endpoint detection by device type 0x0301.
+- Subscriptions to LocalTemperature, heat/cool setpoints, SystemMode and
+  ThermostatRunningState, filtered by AttributeList.
+- Normal and featured tiles, a setpoint line on the chart, and a "Running"
+  timeline in the detail view.
+
+**Target device: tado° Wireless Smart Thermostat X.** A battery-powered
+wall thermostat on Thread, so it's reached through the HomePod like the
+TIMMERFLOTTE. Expect:
+- **It's probably an ICD.** Check the probe's `icd:` line before anything
+  else.
+- **It may also report humidity.** If the node has a Relative Humidity
+  cluster (0x0405), the thermostat tile shows it, the same as sensors do
+  today. The current discovery only adds humidity for `temperature_sensor`.
+- **Heating demand matters more than running state.** It controls the
+  boiler through tado's own receiver, so PIHeatingDemand and running state
+  may be what reflects "heating".
+
+**Plan:**
+
+1. **Pair and probe a real thermostat first.** Run
+   `mattertui pair <id> <code>`, then `nodes --probe`. Extend `--probe` to list
+   every Thermostat (0x0201) attribute the device exposes, with its value.
+   The rest of this milestone is driven by what the device actually has.
+   Capture the probe output as a test fixture.
+2. **Read the attributes real devices commonly expose:**
+   - **ControlSequenceOfOperation** (0x001B): heat-only, cool-only or both.
+     Decides which setpoints and modes to show, so a heat-only radiator valve
+     never shows a cooling setpoint.
+   - **Heat setpoint limits** (0x0015 and 0x0016): the scale for a setpoint
+     gauge.
+   - **PIHeatingDemand** (0x0008, percent): valve or boiler demand. Use it to
+     infer "heating" when ThermostatRunningState (0x0029) is missing, which
+     it often is on radiator valves. Graph it in the detail view.
+   - **OutdoorTemperature** (0x0001), if present.
+   - **Occupancy** (0x0002), and the unoccupied setpoints
+     (0x0013 and 0x0014).
+   - **ThermostatRunningMode** (0x001E) and **SetpointChangeSource**
+     (0x0030), if present.
+   - **Matter 1.4 presets:** the active preset name (e.g. "Away" or "Eco"),
+     if the device has them.
+3. **Display:**
+   - Featured tile: a setpoint gauge showing the min–max limits, the current
+     temperature marker and the setpoint marker. This was planned in §6 but
+     never built.
+   - Heating demand as a small meter.
+   - A clear "off" state when SystemMode is off: dimmed, with no setpoint.
+   - The room summary shows 🔥 while any thermostat in the room is heating.
+4. **Ticker:** "Heating set to 21.0°" when the setpoint changes, plus mode
+   changes ("Heating off", "Heating → auto").
+5. **Battery thermostats:** radiator valves are often Thread ICDs. Run the
+   probe's `icd:` check. If one is a long idle time (LIT) device, revisit
+   the check-in listener (§5).
+6. **Bridged thermostats** (e.g. via a vendor's Matter bridge): make sure
+   endpoint selection copes with several thermostat endpoints behind one
+   node, using the config's `endpoint` override.
+7. **Tests:** decoding of every new attribute, the inferred running state,
+   heat-only versus heat+cool display, and snapshots of each thermostat
+   tile size using the captured fixture.
+
+Still read-only: no setpoint or mode changes.
+
+---
+
+## 12. Milestone 7: Visual refresh (btop-inspired)
+
+The goal is a dashboard that looks like one designed instrument panel, the
+way btop does. Four strands:
+
+### Graphs and meters
+
+- **Braille area graphs.** Replace line charts and block sparklines with
+  btop-style filled braille graphs. Each terminal cell is 2×4 dots, so the
+  resolution is high and the fill runs from the baseline up.
+- **Vertical colour gradients.** Graph colour follows the row, not the
+  series: cool teal near the baseline rising to orange at the top. For
+  temperature the scale is absolute, so 18° and 24° are always the same
+  colours.
+- **Meters.** Battery, humidity, heating demand and setpoint position become
+  btop-style bars: a filled gradient section over a faint dotted track
+  (`■■■■■■····`), with the value right-aligned after them.
+- **Graph reuse.** One `graph` widget (any size, with optional min/max
+  labels and a "now" edge) used by tiles, room panels and the detail view.
+  It is snapshot-tested.
+
+### Panels that fill the screen
+
+- **Columns fill the full height.** Rooms in a column share it in proportion
+  to their content, so there are no ragged bottoms or empty space. Space
+  left in the terminal goes to graphs.
+- **Flexible tiles.** Tiles get a minimum height (their readouts) plus a
+  flexible graph area that absorbs spare rows. A tall terminal shows tall
+  graphs; a short one falls back to today's compact rows.
+- **Rooms fill the width.** Room width can grow too, e.g. one wide room on
+  top with two below, chosen by total content, while keeping declaration
+  order.
+- **Snapshot tests** at 80×24, 120×40, 200×60 and a tall-narrow tmux pane
+  check that every cell is used and nothing overlaps.
+
+### One palette: teal structure, orange data
+
+- **Two colour families.** Teal and blue for structure: borders, titles,
+  labels, axes and graph lows. Orange and amber for data and emphasis:
+  values, highlights, graph highs, lights on, heating. Red is kept for
+  errors and hot temperatures only.
+- **Room colours (decided).** The per-room rainbow accents go. Each room
+  gets a subtle tint within the teal/blue family (teal, cyan, sea green,
+  steel blue, …) for its border and title. Data colours (orange) stay the
+  same in every room. `accent` names map to these tints.
+- **Background (decided).** Keep the terminal's background, which is black
+  on both machines. The palette is tuned for a black background, and the app
+  paints no background of its own.
+- **Fallback.** The 16-colour and `TERM=linux` fallbacks are kept, and
+  mapped to cyan and yellow.
+
+### Chrome and alignment
+
+- **btop-style titles.** Titles sit inside the border (`╭─┤ Living room ├─`),
+  with a small number (¹ ² ³) for jumping straight to a room with `1`–`9`.
+  The clock is centred in the top border, and status shows on the right
+  (`5/6 live · 💡 2`).
+- **A strict label/value grid** inside tiles:
+  - dim labels on the left, bold values right-aligned with units in a fixed
+    column, and dotted leaders between where it helps
+    (`Humidity ······ 55%`);
+  - fixed-width number formatting so values don't jitter as they change;
+  - consistent one-cell padding in every panel.
+- **Emoji (decided for now).** Keep the current emoji, in titles and next to
+  values, and judge once the rest of the refresh is in. They can be trimmed
+  later if they fight the btop look.
+- **Detail view.** It gets the same treatment: one large gradient graph per
+  metric, stacked btop-style, with the min/avg/max grid aligned underneath.
+
+### Order of work
+
+1. Palette tokens and background (everything else builds on them).
+2. Graph and meter widgets, with snapshots.
+3. Layout v2: full-height columns and flexible tiles.
+4. Chrome: titles in borders, room numbers, clock.
+5. Alignment pass over every tile, the detail view and the ticker.
+6. Check the result in tmux over SSH on the Pi, at 80×24 and full screen.
+
+### Decisions (2026-11-15)
+
+- Keep the terminal background (black).
+- Keep the emoji for now; revisit after the refresh.
+- Subtle teal-family tint per room.

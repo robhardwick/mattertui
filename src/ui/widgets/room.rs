@@ -76,6 +76,14 @@ fn summary(app: &App, devices: &[usize]) -> Vec<Span<'static>> {
         let colour = if on > 0 { super::glow(app) } else { t.dim() };
         parts.push(Span::styled(format!("{glyph} {on}/{}", plugs.len()), Style::new().fg(colour)));
     }
+    let heating = devices.iter().any(|&i| {
+        let d = &app.devices[i];
+        current(d, Metric::Running).is_some_and(|r| r as u64 & 1 != 0) || current(d, Metric::HeatDemand).is_some_and(|p| p > 0.0)
+    });
+    if heating {
+        sep(&mut parts);
+        parts.push(Span::styled(icons::cell("fire", t.ascii), Style::new().fg(super::flame(app))));
+    }
     if parts.is_empty() {
         return parts;
     }

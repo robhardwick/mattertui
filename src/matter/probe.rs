@@ -72,6 +72,8 @@ async fn probe_inner(node: &Node) -> Result<String> {
     endpoints.dedup();
 
     let mut value_paths = Vec::new();
+    let mut thermostat_eps = Vec::new();
+    let mut power_eps = Vec::new();
     for &ep in &endpoints {
         let types: Vec<u64> = decode::find(&report, ep, DESCRIPTOR, 0x0000)
             .map(decode::elements)
@@ -87,6 +89,14 @@ async fn probe_inner(node: &Node) -> Result<String> {
             .collect();
         let names: Vec<String> = types.iter().map(|t| device_type_name(*t)).collect();
         let _ = writeln!(out, "    endpoint {ep}: {}", names.join(", "));
+        let clusters: Vec<String> = servers.iter().map(|c| cluster_name(*c)).collect();
+        let _ = writeln!(out, "      clusters: {}", clusters.join(", "));
+        if servers.contains(&u64::from(THERMOSTAT)) {
+            thermostat_eps.push(ep);
+        }
+        if servers.contains(&u64::from(POWER_SOURCE)) {
+            power_eps.push(ep);
+        }
 
         for (cluster, attr) in [
             (ON_OFF, 0x0000),
@@ -124,7 +134,177 @@ async fn probe_inner(node: &Node) -> Result<String> {
             );
         }
     }
+    // Battery reporting varies too (percentage vs charge level).
+    for ep in power_eps {
+        let attrs = node.read(&[ReadPath::cluster(ep, POWER_SOURCE)]).await?;
+        let _ = writeln!(out, "    power source attributes (endpoint {ep}):");
+        let mut attrs: Vec<_> = attrs.iter().filter(|(p, _)| p.endpoint == ep && p.cluster == POWER_SOURCE).collect();
+        attrs.sort_by_key(|(p, _)| p.attribute);
+        for (p, v) in attrs {
+            let name = match p.attribute {
+                0x0000 => "Status",
+                0x0001 => "Order",
+                0x0002 => "Description",
+                0x000B => "BatVoltage (mV)",
+                0x000C => "BatPercentRemaining (½%)",
+                0x000D => "BatTimeRemaining (s)",
+                0x000E => "BatChargeLevel (0 ok,1 warn,2 crit)",
+                0x000F => "BatReplacementNeeded",
+                0x0010 => "BatReplaceability",
+                0x0011 => "BatPresent",
+                0x0013 => "BatReplacementDescription",
+                0x0014 => "BatCommonDesignation",
+                0x0017 => "BatQuantity",
+                0x001F => "EndpointList",
+                0xFFF8..=0xFFFD => continue,
+                _ => "?",
+            };
+            let s = format!("{v:?}");
+            let s = if s.len() > 80 { format!("{}…", &s[..80]) } else { s };
+            let _ = writeln!(out, "      0x{:04X} {name:<36} {s}", p.attribute);
+        }
+    }
+
+    // Thermostats vary a lot between devices: dump every attribute.
+    for ep in thermostat_eps {
+        let attrs = node.read(&[ReadPath::cluster(ep, THERMOSTAT)]).await?;
+        let _ = writeln!(out, "    thermostat attributes (endpoint {ep}):");
+        let mut attrs: Vec<_> = attrs.iter().filter(|(p, _)| p.endpoint == ep && p.cluster == THERMOSTAT).collect();
+        attrs.sort_by_key(|(p, _)| p.attribute);
+        for (p, v) in attrs {
+            let _ = writeln!(
+                out,
+                "      0x{:04X} {:<32} {}",
+                p.attribute,
+                thermostat_attr_name(p.attribute),
+                thermostat_value(p.attribute, v)
+            );
+        }
+    }
     Ok(out)
+}
+
+fn thermostat_attr_name(a: u32) -> &'static str {
+    match a {
+        0x0000 => "LocalTemperature",
+        0x0001 => "OutdoorTemperature",
+        0x0002 => "Occupancy",
+        0x0003 => "AbsMinHeatSetpointLimit",
+        0x0004 => "AbsMaxHeatSetpointLimit",
+        0x0005 => "AbsMinCoolSetpointLimit",
+        0x0006 => "AbsMaxCoolSetpointLimit",
+        0x0007 => "PICoolingDemand",
+        0x0008 => "PIHeatingDemand",
+        0x0010 => "LocalTemperatureCalibration",
+        0x0011 => "OccupiedCoolingSetpoint",
+        0x0012 => "OccupiedHeatingSetpoint",
+        0x0013 => "UnoccupiedCoolingSetpoint",
+        0x0014 => "UnoccupiedHeatingSetpoint",
+        0x0015 => "MinHeatSetpointLimit",
+        0x0016 => "MaxHeatSetpointLimit",
+        0x0017 => "MinCoolSetpointLimit",
+        0x0018 => "MaxCoolSetpointLimit",
+        0x0019 => "MinSetpointDeadBand",
+        0x001A => "RemoteSensing",
+        0x001B => "ControlSequenceOfOperation",
+        0x001C => "SystemMode",
+        0x001E => "ThermostatRunningMode",
+        0x0020 => "StartOfWeek",
+        0x0021 => "NumberOfWeeklyTransitions",
+        0x0022 => "NumberOfDailyTransitions",
+        0x0023 => "TemperatureSetpointHold",
+        0x0024 => "TemperatureSetpointHoldDuration",
+        0x0025 => "ThermostatProgrammingOperationMode",
+        0x0029 => "ThermostatRunningState",
+        0x0030 => "SetpointChangeSource",
+        0x0031 => "SetpointChangeAmount",
+        0x0032 => "SetpointChangeSourceTimestamp",
+        0x0034 => "OccupiedSetback",
+        0x0040 => "EmergencyHeatDelta",
+        0x0048 => "PresetTypes",
+        0x0049 => "ScheduleTypes",
+        0x004A => "NumberOfPresets",
+        0x004E => "ActivePresetHandle",
+        0x0050 => "Presets",
+        0x0051 => "Schedules",
+        0x0052 => "SetpointHoldExpiryTimestamp",
+        0xFFF8 => "GeneratedCommandList",
+        0xFFF9 => "AcceptedCommandList",
+        0xFFFB => "AttributeList",
+        0xFFFC => "FeatureMap",
+        0xFFFD => "ClusterRevision",
+        _ => "?",
+    }
+}
+
+fn thermostat_value(a: u32, v: &matter_controller::Value) -> String {
+    let temp = |v| fmt_temp(v, "").map_or_else(|| format!("{v:?}"), |s| s.trim().to_string());
+    match a {
+        0x0000 | 0x0001 | 0x0003..=0x0006 | 0x0011..=0x0018 => temp(v),
+        0x0007 | 0x0008 => decode::as_u64(v).map_or_else(|| format!("{v:?}"), |p| format!("{p}%")),
+        0x001C => decode::as_u64(v).map_or_else(|| format!("{v:?}"), |m| format!("{m} ({})", system_mode(m))),
+        0x001B => decode::as_u64(v).map_or_else(
+            || format!("{v:?}"),
+            |s| {
+                let name = match s {
+                    0 => "cooling only",
+                    1 => "cooling with reheat",
+                    2 => "heating only",
+                    3 => "heating with reheat",
+                    4 => "cooling and heating",
+                    5 => "cooling and heating with reheat",
+                    _ => "?",
+                };
+                format!("{s} ({name})")
+            },
+        ),
+        0x0029 => decode::as_u64(v).map_or_else(|| format!("{v:?}"), |b| format!("0b{b:07b} (bit0 heat, bit1 cool, bit2 fan)")),
+        0xFFF8 | 0xFFF9 | 0xFFFB => {
+            let ids: Vec<String> = decode::elements(v).into_iter().filter_map(decode::as_u64).map(|i| format!("{i:#06x}")).collect();
+            format!("[{}]", ids.join(" "))
+        }
+        _ => {
+            let s = format!("{v:?}");
+            if s.len() > 100 { format!("{}…", &s[..100]) } else { s }
+        }
+    }
+}
+
+fn cluster_name(c: u64) -> String {
+    let name = match c {
+        0x0003 => "Identify",
+        0x0004 => "Groups",
+        0x0006 => "OnOff",
+        0x001D => "Descriptor",
+        0x001E => "Binding",
+        0x001F => "AccessControl",
+        0x0028 => "BasicInformation",
+        0x0029 => "OtaProvider",
+        0x002A => "OtaRequestor",
+        0x002F => "PowerSource",
+        0x0030 => "GeneralCommissioning",
+        0x0031 => "NetworkCommissioning",
+        0x0032 => "DiagnosticLogs",
+        0x0033 => "GeneralDiagnostics",
+        0x0035 => "ThreadNetworkDiagnostics",
+        0x0036 => "WiFiNetworkDiagnostics",
+        0x003C => "AdministratorCommissioning",
+        0x003E => "OperationalCredentials",
+        0x003F => "GroupKeyManagement",
+        0x0040 => "FixedLabel",
+        0x0041 => "UserLabel",
+        0x0046 => "IcdManagement",
+        0x0090 => "ElectricalPowerMeasurement",
+        0x0091 => "ElectricalEnergyMeasurement",
+        0x0201 => "Thermostat",
+        0x0202 => "FanControl",
+        0x0204 => "ThermostatUserInterfaceConfiguration",
+        0x0402 => "TemperatureMeasurement",
+        0x0405 => "RelativeHumidityMeasurement",
+        0x0406 => "OccupancySensing",
+        _ => return format!("{c:#06x}"),
+    };
+    name.to_string()
 }
 
 fn fmt_temp(v: &matter_controller::Value, what: &str) -> Option<String> {

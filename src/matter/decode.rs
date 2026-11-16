@@ -81,6 +81,8 @@ pub fn reading(cluster: u32, attribute: u32, v: &Value) -> Option<(Metric, Optio
         (THERMOSTAT, 0x0012) => (Metric::HeatSetpoint, centi_celsius(v)),
         (THERMOSTAT, 0x001C) => (Metric::Mode, num(v)),
         (THERMOSTAT, 0x0029) => (Metric::Running, num(v)),
+        (THERMOSTAT, 0x0008) => (Metric::HeatDemand, num(v)),
+        (POWER_SOURCE, 0x000E) => (Metric::BatteryLevel, num(v)),
         (HUMIDITY, 0x0000) => (Metric::Humidity, num(v).map(|h| h / 100.0)),
         // BatPercentRemaining is in half-percent units.
         (POWER_SOURCE, 0x000C) => (Metric::Battery, num(v).map(|b| b / 2.0)),
@@ -103,6 +105,8 @@ mod tests {
         assert_eq!(reading(0x0402, 0, &Value::Null), Some((Metric::Temperature, None)));
         assert_eq!(reading(0x0405, 0, &Value::Uint(4520)), Some((Metric::Humidity, Some(45.2))));
         assert_eq!(reading(0x002F, 0x0C, &Value::Uint(200)), Some((Metric::Battery, Some(100.0))));
+        assert_eq!(reading(0x0201, 0x0008, &Value::Uint(45)), Some((Metric::HeatDemand, Some(45.0))));
+        assert_eq!(reading(0x002F, 0x0E, &Value::Uint(1)), Some((Metric::BatteryLevel, Some(1.0))));
         assert_eq!(reading(0x0006, 0x4000, &Value::Bool(true)), None);
     }
 

@@ -352,6 +352,14 @@ impl App {
                         let on = *v != 0.0;
                         self.ticker.push(i, format!("{name} {}", if on { "on" } else { "off" }), if on { Tone::Glow } else { Tone::Normal });
                     }
+                    (Metric::HeatSetpoint, Some(v), Some(o)) if (v - o).abs() >= 0.05 => {
+                        let text = format!("{name} set to {}", super::widgets::fmt_temp_unit(self.config.ui.temperature_unit, *v));
+                        self.ticker.push(i, text, Tone::Heat);
+                    }
+                    (Metric::Mode, Some(v), Some(o)) if v != &o => {
+                        let mode = super::widgets::tile::system_mode(*v as u8);
+                        self.ticker.push(i, format!("{name} → {mode}"), if *v == 0.0 { Tone::Normal } else { Tone::Heat });
+                    }
                     (Metric::Running, Some(v), Some(o)) if (*v as u64 & 1) != (o as u64 & 1) => {
                         let heating = *v as u64 & 1 != 0;
                         self.ticker.push(i, format!("{name} heating {}", if heating { "on" } else { "off" }), if heating { Tone::Heat } else { Tone::Normal });
