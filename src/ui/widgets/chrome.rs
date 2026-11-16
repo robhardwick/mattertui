@@ -2,7 +2,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Widget};
 use tracing::Level;
@@ -13,6 +13,8 @@ use crate::state::Metric;
 use crate::ui::app::App;
 use crate::ui::icons;
 
+/// A btop-style rule across the top:
+/// `──┤ mattertui ├─┤● 5/6 live · 💡 2 on├────┤ 00:12 ├────┤1h · ? help├──`.
 pub fn top_bar(app: &App, area: Rect, buf: &mut Buffer) {
     let t = &app.theme;
     let total = app.devices.len();
@@ -21,30 +23,59 @@ pub fn top_bar(app: &App, area: Rect, buf: &mut Buffer) {
         .filter(|&i| app.config.devices[i].kind == DeviceKind::Plug && current(&app.devices[i], Metric::On) == Some(1.0))
         .count();
 
+    let rule = if t.ascii { '-' } else { '─' };
+    for x in area.left()..area.right() {
+        buf[(x, area.y)].set_char(rule).set_style(Style::new().fg(t.frame()));
+    }
+    let open = || Span::styled("┤", Style::new().fg(t.frame()));
+    let close = || Span::styled("├", Style::new().fg(t.frame()));
+    let sep = || Span::styled(" · ", Style::new().fg(t.faint()));
+
     let mut left = vec![
-        Span::styled(" mattertui ", t.bold(t.fg())),
-        Span::styled("│ ", Style::new().fg(t.faint())),
-        Span::styled("● ", Style::new().fg(if live == total { t.good() } else { t.warn() })),
+        Span::styled("──", Style::new().fg(t.frame())),
+        open(),
+        Span::styled(" mattertui ", t.bold(t.title())),
+        close(),
+        Span::styled("─", Style::new().fg(t.frame())),
+        open(),
+        Span::styled(" ● ", Style::new().fg(if live == total { t.good() } else { t.warn() })),
         Span::styled(format!("{live}/{total} live"), t.muted()),
-        Span::styled("  ", t.muted()),
-        Span::styled(format!("{} ", icons::cell("lamp", t.ascii)), Style::new().fg(if lights_on > 0 { t.glow() } else { t.dim() })),
-        Span::styled(format!("{lights_on} on"), t.muted()),
+        sep(),
+        Span::styled(format!("{} ", icons::cell("lamp", t.ascii)), Style::new().fg(if lights_on > 0 { super::glow(app) } else { t.dim() })),
+        Span::styled(format!("{lights_on} on "), t.muted()),
     ];
     let unseen = app.unseen_warnings();
     if unseen > 0 && !app.log_open {
-        left.push(Span::styled(format!("  ⚠ {unseen} "), Style::new().fg(t.warn()).add_modifier(Modifier::BOLD)));
-        left.push(Span::styled("(` for log)", Style::new().fg(t.faint())));
+        left.push(Span::styled(format!("· ⚠ {unseen} "), t.bold(t.warn())));
     }
-    Line::from(left).render(area, buf);
+    left.push(close());
+    let left = Line::from(left);
+    let left_w = left.width() as u16;
+    left.render(area, buf);
 
-    let clock = jiff::ZonedDateTime::now().strftime("%H:%M").to_string();
-    Line::from(vec![
-        Span::styled(format!("{} ", app.range_label()), t.muted()),
-        Span::styled("? help ", Style::new().fg(t.faint())),
-        Span::styled(format!("{clock} "), t.bold(t.fg())),
-    ])
-    .alignment(Alignment::Right)
-    .render(area, buf);
+    let right = Line::from(vec![
+        open(),
+        Span::styled(format!(" {} ", app.range_label()), t.muted()),
+        Span::styled("· ", Style::new().fg(t.faint())),
+        Span::styled("?", t.bold(t.orange())),
+        Span::styled(" help ", t.muted()),
+        close(),
+        Span::styled("──", Style::new().fg(t.frame())),
+    ]);
+    let right_w = right.width() as u16;
+    right.alignment(Alignment::Right).render(area, buf);
+
+    // The clock sits in the middle when there's room for it.
+    let clock = Line::from(vec![
+        open(),
+        Span::styled(format!(" {} ", jiff::ZonedDateTime::now().strftime("%H:%M")), t.bold(t.fg())),
+        close(),
+    ]);
+    let cw = clock.width() as u16;
+    let cx = area.x + area.width.saturating_sub(cw) / 2;
+    if cx > area.x + left_w + 1 && cx + cw + 1 < area.right().saturating_sub(right_w) {
+        clock.render(Rect::new(cx, area.y, cw, 1), buf);
+    }
 }
 
 pub fn log_panel(app: &App, area: Rect, buf: &mut Buffer) {
@@ -55,7 +86,7 @@ pub fn log_panel(app: &App, area: Rect, buf: &mut Buffer) {
     } else {
         Span::styled(format!(" paused ↑{} · End to follow ", app.log_scroll), Style::new().fg(t.warn()))
     };
-    let border = if app.log_focus { Style::new().fg(t.fg()) } else { Style::new().fg(t.border()) };
+    let border = if app.log_focus { Style::new().fg(t.title()) } else { Style::new().fg(t.frame()) };
     let block = Block::new()
         .borders(Borders::TOP)
         .border_type(BorderType::Rounded)
@@ -104,6 +135,7 @@ fn device_accent(app: &App, id: &str) -> Option<ratatui::style::Color> {
 
 const HELP: &[(&str, &str)] = &[
     ("←↓↑→ / hjkl", "move between devices"),
+    ("1–9", "jump to a room"),
     ("Enter", "device detail (Esc to go back)"),
     ("[ ]", "chart range"),
     ("m", "toggle motion"),
@@ -129,7 +161,7 @@ pub fn help(app: &App, area: Rect, buf: &mut Buffer) {
     block.render(r, buf);
     for (i, (k, v)) in HELP.iter().enumerate() {
         Line::from(vec![
-            Span::styled(format!(" {k:<14}"), t.bold(t.glow())),
+            Span::styled(format!(" {k:<14}"), t.bold(t.orange())),
             Span::styled(*v, t.text()),
         ])
         .render(Rect::new(inner.x, inner.y + 1 + i as u16, inner.width, 1), buf);

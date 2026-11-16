@@ -1,6 +1,7 @@
 //! The dashboard: terminal setup, event loop and top-level drawing.
 
 pub mod app;
+pub mod graph;
 pub mod icons;
 pub mod layout;
 pub mod motion;
@@ -434,11 +435,21 @@ icon = "plug"
     /// Strip the volatile clock so snapshots are stable.
     pub fn stable(s: String) -> String {
         let mut lines: Vec<String> = s.lines().map(str::to_string).collect();
-        // The top bar ends with the clock, "HH:MM".
-        if let Some(top) = lines.first_mut()
-            && let Some((cut, _)) = top.char_indices().rev().nth(4)
-        {
-            top.replace_range(cut.., "HH:MM");
+        // The top bar shows the clock as "┤ HH:MM ├".
+        if let Some(top) = lines.first_mut() {
+            let mut out = String::new();
+            let mut rest = top.as_str();
+            while let Some(p) = rest.find("┤ ") {
+                out.push_str(&rest[..p + "┤ ".len()]);
+                rest = &rest[p + "┤ ".len()..];
+                let b = rest.as_bytes();
+                if b.len() >= 5 && b[2] == b':' && b[..2].iter().chain(&b[3..5]).all(u8::is_ascii_digit) {
+                    out.push_str("HH:MM");
+                    rest = &rest[5..];
+                }
+            }
+            out.push_str(rest);
+            *top = out;
         }
         lines.join("\n")
     }
@@ -704,5 +715,28 @@ mod thermostat_tests {
         reading(&mut app, Metric::Mode, 0.0);
         let texts: Vec<_> = app.ticker.events().map(|e| e.text.clone()).collect();
         assert_eq!(texts, ["Heating → off", "Heating set to 18.0°"]);
+    }
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::app::View;
+    use super::tests_support::*;
+    use super::theme::Theme;
+
+    /// The bare Linux console: no braille, no emoji, 16 colours.
+    #[test]
+    fn ascii_fallback_has_no_braille_or_emoji() {
+        for view in [View::Dashboard, View::Detail] {
+            let mut app = fake_app();
+            app.theme = Theme { truecolor: false, ascii: true };
+            app.view = view;
+            let screen = render(&mut app, 100, 30);
+            let bad: Vec<char> = screen
+                .chars()
+                .filter(|c| ('\u{2800}'..='\u{28FF}').contains(c) || *c as u32 >= 0x1F000)
+                .collect();
+            assert!(bad.is_empty(), "{view:?}: found {bad:?}\n{screen}");
+        }
     }
 }

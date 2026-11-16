@@ -26,29 +26,6 @@ pub fn sample(history: &History, now_min: i64, range_min: i64, n: usize) -> Vec<
     out
 }
 
-/// Points for a line chart: x is minutes relative to now (≤ 0).
-pub fn points(history: &History, now_min: i64, range_min: i64) -> Vec<(f64, f64)> {
-    let start = now_min - range_min;
-    let mut pts: Vec<(f64, f64)> = Vec::new();
-    let mut before: Option<f64> = None;
-    for b in history.buckets() {
-        if b.minute < start {
-            before = Some(b.last);
-            continue;
-        }
-        pts.push(((b.minute - now_min) as f64, b.last));
-    }
-    // Carry the value from before the window to its left edge, and the
-    // latest value through to "now", so lines span the whole range.
-    if let Some(v) = before {
-        pts.insert(0, (-range_min as f64, v));
-    }
-    if let Some(&(_, v)) = pts.last() {
-        pts.push((0.0, v));
-    }
-    pts
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stats {
     pub min: f64,
@@ -73,18 +50,6 @@ pub fn stats(history: &History, now_min: i64, range_min: i64) -> Option<Stats> {
         max,
         avg: sum / n,
     })
-}
-
-/// Eighth-block sparkline glyphs, lowest first.
-pub const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-pub const SPARK_ASCII: [char; 8] = ['_', '_', '.', '.', '-', '-', '=', '#'];
-
-/// Map a value to a sparkline level 0..=7 given the series range.
-pub fn level(v: f64, lo: f64, hi: f64) -> usize {
-    if (hi - lo).abs() < f64::EPSILON {
-        return 3;
-    }
-    (((v - lo) / (hi - lo)) * 7.0).round().clamp(0.0, 7.0) as usize
 }
 
 #[cfg(test)]
@@ -114,24 +79,10 @@ mod tests {
     }
 
     #[test]
-    fn points_span_the_window() {
-        let h = hist(&[(90, 5.0), (105, 6.0)]);
-        let p = points(&h, 110, 10);
-        assert_eq!(p, vec![(-10.0, 5.0), (-5.0, 6.0), (0.0, 6.0)]);
-    }
-
-    #[test]
     fn stats_over_window_only() {
         let h = hist(&[(50, 100.0), (105, 2.0), (106, 4.0)]);
         let s = stats(&h, 110, 10).unwrap();
         assert_eq!((s.min, s.max, s.avg), (2.0, 4.0, 3.0));
         assert!(stats(&h, 300, 10).is_none());
-    }
-
-    #[test]
-    fn spark_levels() {
-        assert_eq!(level(0.0, 0.0, 7.0), 0);
-        assert_eq!(level(7.0, 0.0, 7.0), 7);
-        assert_eq!(level(5.0, 5.0, 5.0), 3);
     }
 }

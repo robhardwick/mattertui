@@ -3,11 +3,10 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Block, BorderType, Chart, Dataset, GraphType, Widget};
+use ratatui::widgets::{Block, BorderType, Widget};
 
-use super::tile::{system_mode, temperature_chart, transport_name};
+use super::tile::{system_mode, transport_name};
 use super::{ago, current, fmt_temp, health_badge, room, timeline};
 use crate::state::{Metric, Status, unix_minute};
 use crate::ui::app::App;
@@ -22,21 +21,32 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     let room_idx = app.rooms.iter().position(|r| r.contains(&i)).unwrap_or(0);
     let accent = room::accent(app, room_idx);
 
+    let bracket = |c: &'static str| Span::styled(c, Style::new().fg(accent));
     let block = Block::bordered()
-        .border_type(BorderType::Rounded)
+        .border_type(if t.ascii { BorderType::Plain } else { BorderType::Rounded })
         .border_style(Style::new().fg(accent))
         .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                icons::glyph(cfg.icon.as_ref().map(|i| i.get_ref().as_str()), icons::default_for(cfg.kind), t.ascii),
-                Style::new().fg(accent),
-            ),
-            Span::raw(" "),
-            Span::styled(cfg.name.clone(), t.bold(t.fg())),
+            bracket("┤"),
+            Span::raw(format!(
+                " {} ",
+                icons::glyph(cfg.icon.as_ref().map(|i| i.get_ref().as_str()), icons::default_for(cfg.kind), t.ascii)
+            )),
+            Span::styled(cfg.name.clone(), t.bold(t.title())),
             Span::styled(format!(" · {} ", app.config.rooms[room_idx].name), Style::new().fg(accent)),
+            bracket("├"),
         ]))
         .title_bottom(
-            Line::styled(" ←→ device · [ ] range · Esc back ", Style::new().fg(t.faint())).alignment(Alignment::Right),
+            Line::from(vec![
+                bracket("┤"),
+                Span::styled(" ←→", t.bold(t.orange())),
+                Span::styled(" device · ", t.muted()),
+                Span::styled("[ ]", t.bold(t.orange())),
+                Span::styled(" range · ", t.muted()),
+                Span::styled("Esc", t.bold(t.orange())),
+                Span::styled(" back ", t.muted()),
+                bracket("├"),
+            ])
+            .alignment(Alignment::Right),
         );
     let inner = block.inner(area);
     block.render(area, buf);
@@ -64,7 +74,8 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
                 }
                 .to_string(),
             ));
-            rest.push(th.heat_limits.map(|(lo, hi)| format!("setpoint {}–{}", fmt_temp(app, lo), fmt_temp(app, hi))));
+            let whole = |v: f64| fmt_temp(app, v).replace(".0°", "°");
+            rest.push(th.heat_limits.map(|(lo, hi)| format!("setpoint {}–{}", whole(lo), whole(hi))));
         }
         for s in rest.into_iter().flatten() {
             facts.push(Span::styled(format!("  ·  {s}"), t.muted()));
@@ -72,7 +83,10 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     } else {
         facts.push(Span::styled(format!("id {}", cfg.id.get_ref()), t.muted()));
     }
-    Line::from(facts).render(row(inner, 0), buf);
+    // Facts can be long (thermostats): wrap onto a second line.
+    ratatui::widgets::Paragraph::new(Line::from(facts))
+        .wrap(ratatui::widgets::Wrap { trim: true })
+        .render(Rect::new(inner.x, inner.y, inner.width, 2).intersection(inner), buf);
 
     // Health.
     let health = app.health(i);
@@ -99,21 +113,21 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     if let Some(last) = d.last_report {
         status.push(Span::styled(format!("  ·  last report {} ago", ago(last)), t.muted()));
     }
-    Line::from(status).render(row(inner, 1), buf);
+    Line::from(status).render(row(inner, 2), buf);
 
     // Range tabs.
     let mut tabs = vec![Span::styled("range ", t.muted())];
     for (label, active) in app.ranges() {
         tabs.push(if active {
-            Span::styled(format!(" {label} "), Style::new().fg(Color::Black).bg(accent).add_modifier(Modifier::BOLD))
+            Span::styled(format!(" {label} "), Style::new().fg(Color::Black).bg(t.orange()).add_modifier(Modifier::BOLD))
         } else {
             Span::styled(format!(" {label} "), t.muted())
         });
     }
-    Line::from(tabs).render(row(inner, 3), buf);
+    Line::from(tabs).render(row(inner, 4), buf);
 
     // One section per metric with history.
-    let body = Rect::new(inner.x, inner.y + 5, inner.width, inner.height.saturating_sub(5));
+    let body = Rect::new(inner.x, inner.y + 6, inner.width, inner.height.saturating_sub(6));
     let charts: Vec<Metric> = [Metric::Temperature, Metric::Humidity, Metric::HeatDemand, Metric::Battery]
         .into_iter()
         .filter(|m| d.history.contains_key(m))
@@ -138,12 +152,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         let area = Rect::new(body.x, y, body.width, chart_h);
         section_title(app, i, m, row(area, 0), buf);
         let chart = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(2));
-        match m {
-            Metric::Temperature => temperature_chart(app, i, chart, buf, true),
-            Metric::Humidity => line_chart(app, i, m, chart, buf, |v| t.humidity(v), |v| format!("{v:.0}%")),
-            Metric::HeatDemand => line_chart(app, i, m, chart, buf, |_| t.heat(), |v| format!("{v:.0}%")),
-            _ => line_chart(app, i, m, chart, buf, |_| t.dim(), |v| format!("{v:.0}%")),
-        }
+        graph_with_axes(app, i, m, chart, buf);
         y += chart_h;
     }
     for m in timelines {
@@ -210,48 +219,40 @@ fn section_title(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Buff
     Line::from(spans).render(area, buf);
 }
 
-fn line_chart(
-    app: &App,
-    device: usize,
-    m: Metric,
-    area: Rect,
-    buf: &mut Buffer,
-    colour: impl Fn(f64) -> Color,
-    label: impl Fn(f64) -> String,
-) {
+/// A gradient graph with a scale gutter on the left and a time axis below.
+fn graph_with_axes(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Buffer) {
+    const GUTTER: u16 = 8;
     let t = &app.theme;
-    let Some(h) = app.devices[device].history.get(&m) else { return };
-    let range = app.range_minutes();
-    let pts = series::points(h, unix_minute(), range);
-    let (mut lo, mut hi) = pts
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(_, y)| (lo.min(y), hi.max(y)));
-    if !lo.is_finite() {
+    if area.height < 2 || area.width <= GUTTER {
         return;
     }
-    if hi - lo < 4.0 {
-        let mid = (hi + lo) / 2.0;
-        lo = mid - 2.0;
-        hi = mid + 2.0;
+    let plot = Rect::new(area.x + GUTTER, area.y, area.width - GUTTER, area.height - 1);
+    let overlay = (m == Metric::Temperature && app.devices[device].history.contains_key(&Metric::HeatSetpoint))
+        .then_some(Metric::HeatSetpoint);
+    super::metric_graph_bare(app, device, m, overlay, plot, buf);
+
+    // Scale: the graph's range, top and bottom, plus a midpoint if tall.
+    if let Some((lo, hi)) = super::metric_range(app, device, m, overlay, plot.width) {
+        let fmt = |v: f64| match m {
+            Metric::Temperature => fmt_temp(app, v),
+            _ => format!("{v:.0}%"),
+        };
+        let label = |y: u16, v: f64, buf: &mut Buffer| {
+            Line::styled(format!("{} ┤", fmt(v)), Style::new().fg(t.dim()))
+                .alignment(Alignment::Right)
+                .render(Rect::new(area.x, y, GUTTER, 1), buf);
+        };
+        label(plot.y, hi, buf);
+        label(plot.bottom() - 1, lo, buf);
+        if plot.height >= 6 {
+            label(plot.y + plot.height / 2, (hi + lo) / 2.0, buf);
+        }
     }
-    let c = current(&app.devices[device], m).map_or(t.dim(), &colour);
-    let set = Dataset::default()
-        .marker(if t.ascii { Marker::Dot } else { Marker::Braille })
-        .graph_type(GraphType::Line)
-        .style(Style::new().fg(c))
-        .data(&pts);
-    Chart::new(vec![set])
-        .x_axis(
-            Axis::default()
-                .bounds([-(range as f64), 0.0])
-                .labels([Span::styled(format!("-{}", app.range_label()), t.muted()), Span::styled("now", t.muted())])
-                .style(Style::new().fg(t.faint())),
-        )
-        .y_axis(
-            Axis::default()
-                .bounds([lo, hi])
-                .labels([Span::styled(label(lo), t.muted()), Span::styled(label(hi), t.muted())])
-                .style(Style::new().fg(t.faint())),
-        )
-        .render(area, buf);
+    // Time axis.
+    let axis = Rect::new(plot.x, plot.bottom(), plot.width, 1);
+    for x in axis.left()..axis.right() {
+        buf[(x, axis.y)].set_char(if t.ascii { '-' } else { '─' }).set_style(Style::new().fg(t.faint()));
+    }
+    Line::styled(format!("-{} ", app.range_label()), t.muted()).render(axis, buf);
+    Line::styled(" now", t.muted()).alignment(Alignment::Right).render(axis, buf);
 }

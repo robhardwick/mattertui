@@ -1,8 +1,10 @@
-//! Room panel: accent border, name, and a summary of its devices.
+//! Room box: a tinted rounded frame with a btop-style title
+//! (`╭─┤¹ 🏠 Living room├──────┤20.5° · 51%├─╮`). Devices are borderless
+//! sections inside it.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget};
 
@@ -11,7 +13,11 @@ use crate::config::DeviceKind;
 use crate::state::Metric;
 use crate::ui::app::App;
 use crate::ui::icons;
+use crate::ui::motion::mix;
 
+const SUPERSCRIPT: [&str; 9] = ["¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"];
+
+/// The room's tint (teal family).
 pub fn accent(app: &App, room: usize) -> Color {
     let cfg = &app.config.rooms[room];
     app.theme.accent(cfg.accent.as_ref().map(|a| a.get_ref().as_str()), room)
@@ -20,28 +26,49 @@ pub fn accent(app: &App, room: usize) -> Color {
 pub fn render(app: &App, room: usize, area: Rect, buf: &mut Buffer) {
     let t = &app.theme;
     let cfg = &app.config.rooms[room];
-    let accent = accent(app, room);
+    let tint = accent(app, room);
     let devices = &app.rooms[room];
     let has_selection = devices.contains(&app.selected);
+    // Frames sit back unless the room holds the selection.
+    let frame = if has_selection { tint } else { mix(t.frame(), tint, 0.35) };
+    let bracket = |s: &'static str| Span::styled(s, Style::new().fg(frame));
 
-    let mut title = vec![Span::raw(" ")];
-    if let Some(icon) = cfg.icon.as_ref().and_then(|i| icons::resolve(i.get_ref(), t.ascii)) {
-        title.push(Span::styled(format!("{} ", icons::pad2(icon)), Style::new().fg(accent)));
+    let mut title = vec![bracket("┤")];
+    if let Some(n) = SUPERSCRIPT.get(room) {
+        title.push(Span::styled(*n, t.bold(t.orange())));
     }
-    title.push(Span::styled(cfg.name.clone(), Style::new().fg(accent).add_modifier(Modifier::BOLD)));
-    title.push(Span::raw(" "));
+    if let Some(icon) = cfg.icon.as_ref().and_then(|i| icons::resolve(i.get_ref(), t.ascii)) {
+        title.push(Span::raw(format!(" {}", icons::pad2(icon))));
+    }
+    title.push(Span::styled(format!(" {} ", cfg.name), t.bold(if has_selection { t.title() } else { tint })));
+    title.push(bracket("├"));
 
-    let border = if has_selection {
-        Style::new().fg(accent)
-    } else {
-        Style::new().fg(accent).add_modifier(Modifier::DIM)
-    };
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(border)
-        .title(Line::from(title))
-        .title(Line::from(summary(app, devices)).alignment(Alignment::Right))
-        .render(area, buf);
+    let title = Line::from(title);
+    let room_for_summary = area.width.saturating_sub(title.width() as u16 + 6) as usize;
+    let mut block = Block::bordered()
+        .border_type(if t.ascii { BorderType::Plain } else { BorderType::Rounded })
+        .border_style(Style::new().fg(frame))
+        .title(title);
+    // The name always wins: drop summary items from the end until it fits.
+    let mut summary = summary(app, devices);
+    while !summary.is_empty() && Line::from(summary.clone()).width() > room_for_summary {
+        summary.truncate(summary.len().saturating_sub(3)); // a value and its separators
+        while summary.last().is_some_and(|s| s.content.trim() == "·" || s.content.trim().is_empty()) {
+            summary.pop();
+        }
+        if summary.len() <= 1 {
+            summary.clear();
+        } else {
+            summary.push(Span::raw(" "));
+        }
+    }
+    if !summary.is_empty() {
+        let mut spans = vec![bracket("┤")];
+        spans.extend(summary);
+        spans.push(bracket("├"));
+        block = block.title(Line::from(spans).alignment(Alignment::Right));
+    }
+    block.render(area, buf);
 }
 
 /// e.g. " 19.8° · 45% · 💡 1/2 "

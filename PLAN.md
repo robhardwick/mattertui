@@ -442,8 +442,8 @@ The app code is identical on both platforms. Only OS-level network setup differs
 5. **Motion** (done): frame clock, tweens, flashes, sweep, breathing, ticker.
 6. **Thermostats** (done, §11): validated against a tado° X; heating is
    estimated because the device doesn't report it.
-7. **Visual refresh** (§12): btop-inspired graphs, panels that fill the
-   screen in both directions, one orange + teal palette, tighter alignment.
+7. **Visual refresh** (done, §12): btop-inspired graphs, panels that fill
+   the screen, one orange + teal palette, tighter alignment.
 
 ---
 
@@ -546,6 +546,35 @@ Still read-only: no setpoint or mode changes.
 ---
 
 ## 12. Milestone 7: Visual refresh (btop-inspired)
+
+**Result (2026-11-16):**
+- **Palette:** teal and blue for structure, orange for emphasis, a
+  temperature gradient running blue → teal → amber → red, and a teal tint
+  per room. Tuned for a black background; the app paints none.
+- **Graphs:** braille area graphs (`ui/graph.rs`) coloured by height, with
+  a setpoint overlay line, and `■` meters.
+- **Tiles:** borderless sections inside each room box, with a header rule
+  that flashes on updates, readouts on a fixed grid, and graphs that absorb
+  spare rows.
+- **Plugs:** they grow too; their spare rows show a square-wave on/off
+  graph, plus "on for 25m".
+- **Layout v2:** columns fill the full height, with spare rows shared by
+  graph weight.
+- **Chrome:**
+  - room titles `┤¹ 🏠 Living room├` with `1`–`9` to jump;
+  - a summary that drops items so the room name is never cut;
+  - a top rule with the clock centred;
+  - a detail view with a scale gutter and time axis;
+  - dotted leaders in compact rows.
+- **Console fallback:** tested; no braille or emoji on `TERM=linux`.
+
+**Left out:**
+- "Rooms widen" (one wide room above two narrower ones). Equal columns
+  that fill the height covered the need.
+- The tmux-over-SSH check on the Pi is still to do on the real Pi.
+- CPU on the Mac (release build, a light on, 15 s): ~3.4% of a core.
+
+The original plan follows.
 
 The goal is a dashboard that looks like one designed instrument panel, the
 way btop does. Four strands:

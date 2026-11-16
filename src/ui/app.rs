@@ -475,6 +475,14 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::Char(c @ '1'..='9') => {
+                // Jump to the first device of room n.
+                let room = c as usize - '1' as usize;
+                if let Some(&first) = self.rooms.get(room).and_then(|r| r.first()) {
+                    self.selected = first;
+                    self.view = View::Dashboard;
+                }
+            }
             KeyCode::Char('p') => self.open_modal(ModalKind::Pair),
             KeyCode::Char('U') => self.open_modal(ModalKind::Unpair),
             KeyCode::Char('q') => self.quit = true,
