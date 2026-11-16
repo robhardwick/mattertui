@@ -18,6 +18,7 @@ const THERMOSTAT: u32 = 0x0201;
 const TEMPERATURE: u32 = 0x0402;
 const HUMIDITY: u32 = 0x0405;
 const POWER_SOURCE: u32 = 0x002F;
+const BOOLEAN_STATE: u32 = 0x0045;
 const FEATURE_MAP: u32 = 0xFFFC;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -106,6 +107,7 @@ async fn probe_inner(node: &Node) -> Result<String> {
             (TEMPERATURE, 0x0000),
             (HUMIDITY, 0x0000),
             (POWER_SOURCE, 0x000C),
+            (BOOLEAN_STATE, 0x0000),
         ] {
             if servers.contains(&u64::from(cluster)) {
                 value_paths.push(ReadPath::concrete(ep, cluster, attr));
@@ -124,6 +126,7 @@ async fn probe_inner(node: &Node) -> Result<String> {
                 (TEMPERATURE, 0) => fmt_temp(value, "temperature"),
                 (HUMIDITY, 0) => decode::as_u64(value).map(|h| format!("humidity {:.1}%", h as f64 / 100.0)),
                 (POWER_SOURCE, 0x0C) => decode::as_u64(value).map(|b| format!("battery {}%", b / 2)),
+                (BOOLEAN_STATE, 0) => decode::as_bool(value).map(|b| format!("state {b} (leak sensor: {})", if b { "LEAK" } else { "dry" })),
                 _ => None,
             };
             let _ = writeln!(
@@ -292,6 +295,8 @@ fn cluster_name(c: u64) -> String {
         0x003E => "OperationalCredentials",
         0x003F => "GroupKeyManagement",
         0x0040 => "FixedLabel",
+        0x0045 => "BooleanState",
+        0x0080 => "BooleanStateConfiguration",
         0x0041 => "UserLabel",
         0x0046 => "IcdManagement",
         0x0090 => "ElectricalPowerMeasurement",
@@ -353,6 +358,7 @@ fn device_type_name(t: u64) -> String {
         0x0012 => "OTA Requestor",
         0x0013 => "Bridged Node",
         0x0016 => "Root Node",
+        0x0043 => "Water Leak Detector",
         0x000E => "Aggregator",
         0x0100 => "On/Off Light",
         0x0101 => "Dimmable Light",

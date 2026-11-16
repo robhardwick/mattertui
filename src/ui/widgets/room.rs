@@ -54,8 +54,8 @@ fn joined_width(items: &[Vec<Span<'static>>]) -> usize {
     items.iter().map(|i| Line::from(i.clone()).width()).sum::<usize>() + items.len().saturating_sub(1)
 }
 
-/// Summary items, most important first: mean temperature, mean humidity,
-/// lights on, heating.
+/// Summary items, most important first: a leak, mean temperature, mean
+/// humidity, lights on, heating.
 fn summary(app: &App, devices: &[usize]) -> Vec<Vec<Span<'static>>> {
     let t = &app.theme;
     let mean = |m: Metric| {
@@ -63,6 +63,9 @@ fn summary(app: &App, devices: &[usize]) -> Vec<Vec<Span<'static>>> {
         (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
     };
     let mut items = Vec::new();
+    if devices.iter().any(|&i| super::is_leaking(&app.devices[i])) {
+        items.push(vec![Span::styled(format!("{} LEAK", icons::get("water", t.ascii)), t.bold(t.bad()))]);
+    }
     if let Some(c) = mean(Metric::Temperature) {
         items.push(vec![Span::styled(fmt_temp(app, c), t.bold(t.title()))]);
     }

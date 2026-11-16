@@ -72,10 +72,12 @@ pub fn centi_celsius(v: &Value) -> Option<f64> {
 /// Map a reported attribute to a metric. `None` if we don't track it.
 /// The inner `Option` is `None` when the device reports null.
 pub fn reading(cluster: u32, attribute: u32, v: &Value) -> Option<(Metric, Option<f64>)> {
-    use super::discover::{HUMIDITY, ON_OFF, POWER_SOURCE, TEMPERATURE, THERMOSTAT};
+    use super::discover::{BOOLEAN_STATE, HUMIDITY, ON_OFF, POWER_SOURCE, TEMPERATURE, THERMOSTAT};
     let num = |v: &Value| as_u64(v).map(|n| n as f64);
+    let flag = |v: &Value| as_bool(v).map(|b| if b { 1.0 } else { 0.0 });
     Some(match (cluster, attribute) {
-        (ON_OFF, 0x0000) => (Metric::On, as_bool(v).map(|b| if b { 1.0 } else { 0.0 })),
+        (ON_OFF, 0x0000) => (Metric::On, flag(v)),
+        (BOOLEAN_STATE, 0x0000) => (Metric::Leak, flag(v)),
         (THERMOSTAT, 0x0000) | (TEMPERATURE, 0x0000) => (Metric::Temperature, centi_celsius(v)),
         (THERMOSTAT, 0x0011) => (Metric::CoolSetpoint, centi_celsius(v)),
         (THERMOSTAT, 0x0012) => (Metric::HeatSetpoint, centi_celsius(v)),
@@ -107,6 +109,8 @@ mod tests {
         assert_eq!(reading(0x002F, 0x0C, &Value::Uint(200)), Some((Metric::Battery, Some(100.0))));
         assert_eq!(reading(0x0201, 0x0008, &Value::Uint(45)), Some((Metric::HeatDemand, Some(45.0))));
         assert_eq!(reading(0x002F, 0x0E, &Value::Uint(1)), Some((Metric::BatteryLevel, Some(1.0))));
+        assert_eq!(reading(0x0045, 0, &Value::Bool(true)), Some((Metric::Leak, Some(1.0))));
+        assert_eq!(reading(0x0045, 0, &Value::Bool(false)), Some((Metric::Leak, Some(0.0))));
         assert_eq!(reading(0x0006, 0x4000, &Value::Bool(true)), None);
     }
 

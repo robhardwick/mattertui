@@ -16,6 +16,7 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("tv", "▭", "="),
     ("thermostat", "≋", "~"),
     ("thermometer", "°", "'"),
+    ("water", "≈", "~"),
     // Readings and states
     ("humidity", "≈", "%"),
     ("battery", "▮", "#"),
@@ -68,6 +69,7 @@ pub fn default_for(kind: DeviceKind) -> &'static str {
         DeviceKind::Plug => "lamp",
         DeviceKind::Thermostat => "thermostat",
         DeviceKind::TemperatureSensor => "thermometer",
+        DeviceKind::LeakSensor => "water",
     }
 }
 

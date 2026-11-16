@@ -729,6 +729,60 @@ mod thermostat_tests {
 }
 
 #[cfg(test)]
+mod leak_tests {
+    use super::tests_support::*;
+    use crate::config::DeviceKind;
+    use crate::state::{AppEvent, DeviceUpdate, Metric, Status};
+
+    const KETTLE: usize = 5;
+
+    /// The kitchen's kettle plug, recast as a leak sensor under the sink.
+    fn leak_app() -> super::App {
+        let mut app = fake_app();
+        app.config.devices[KETTLE].kind = DeviceKind::LeakSensor;
+        app.config.devices[KETTLE].name = "Under sink".into();
+        app.config.devices[KETTLE].icon = None;
+        app.devices[KETTLE].status = Status::Live { max_interval_s: 60 };
+        app
+    }
+
+    fn reading(app: &mut super::App, metric: Metric, v: f64) {
+        app.on_app_event(AppEvent::Device {
+            id: "kettle".into(),
+            update: DeviceUpdate::Reading { metric, value: Some(v) },
+        });
+    }
+
+    #[test]
+    fn dry_then_leak_then_dry() {
+        let mut app = leak_app();
+        reading(&mut app, Metric::Leak, 0.0);
+        reading(&mut app, Metric::Battery, 100.0);
+        let screen = render(&mut app, 130, 34);
+        assert!(screen.contains("dry"), "{screen}");
+        assert!(!screen.contains("LEAK"), "{screen}");
+        insta::assert_snapshot!("dry", stable(screen));
+
+        reading(&mut app, Metric::Leak, 1.0);
+        let screen = render(&mut app, 130, 34);
+        // In the tile and in the room's summary.
+        assert!(screen.matches("LEAK").count() >= 2, "{screen}");
+
+        reading(&mut app, Metric::Leak, 0.0);
+        let logged: Vec<String> = events(&app).into_iter().map(|(_, m)| m).collect();
+        assert_eq!(logged, ["LEAK detected", "dry"]);
+    }
+
+    #[test]
+    fn already_wet_at_startup_is_logged() {
+        let mut app = leak_app();
+        reading(&mut app, Metric::Leak, 1.0);
+        let logged: Vec<String> = events(&app).into_iter().map(|(_, m)| m).collect();
+        assert_eq!(logged, ["LEAK detected"]);
+    }
+}
+
+#[cfg(test)]
 mod console_tests {
     use super::app::View;
     use super::tests_support::*;

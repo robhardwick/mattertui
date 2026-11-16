@@ -435,6 +435,15 @@ impl App {
                         let mode = super::widgets::tile::system_mode(*v as u8);
                         self.event(i, format!("mode → {mode}"));
                     }
+                    // Unlike other changes, the first reading counts: a
+                    // sensor that's already wet must be announced.
+                    (Metric::Leak, Some(v), o) if o.is_none_or(|o| (o != 0.0) != (*v != 0.0)) => {
+                        if *v != 0.0 {
+                            self.event(i, "LEAK detected".into());
+                        } else if o.is_some() {
+                            self.event(i, "dry".into());
+                        }
+                    }
                     (Metric::Running, Some(v), Some(o)) if (*v as u64 & 1) != (o as u64 & 1) => {
                         let heating = *v as u64 & 1 != 0;
                         self.event(i, format!("heating {}", if heating { "on" } else { "off" }));

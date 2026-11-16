@@ -19,7 +19,7 @@ filter = "info,mdns_sd=warn"   # tracing EnvFilter syntax; RUST_LOG overrides
 # rose, gold, sky, sage. Rooms take them in turn and devices take the ones
 # after their room's; set `accent` on a room or device to pin one. Icons are
 # plain symbols, never emoji:
-#   lamp bulb plug fan tv thermostat thermometer humidity battery heating
+#   lamp bulb plug fan tv thermostat thermometer water humidity battery heating
 #   cool home sofa bed moon sun kitchen bath office desk garden tree teddy
 #   games books garage star heart snow
 [[room]]
@@ -35,7 +35,7 @@ name = "Bedroom"
 id = "living-room-lamp"        # also the pairing label: a-z, 0-9, -
 name = "Lamp"
 room = "living-room"
-kind = "plug"                  # plug | thermostat | temperature_sensor
+kind = "plug"                  # plug | thermostat | temperature_sensor | leak_sensor
 
 [[device]]
 id = "bedroom-temp"

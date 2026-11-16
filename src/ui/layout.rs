@@ -80,7 +80,7 @@ pub struct Layout {
 /// Info rows a device box always shows (more appear when there's room).
 pub fn min_info_rows(kind: DeviceKind) -> u16 {
     match kind {
-        DeviceKind::Plug => 1,
+        DeviceKind::Plug | DeviceKind::LeakSensor => 1,
         DeviceKind::TemperatureSensor => 2,
         DeviceKind::Thermostat => 3,
     }
@@ -102,7 +102,7 @@ pub fn min_height(kind: DeviceKind, variant: Variant) -> u16 {
 pub fn natural_height(kind: DeviceKind) -> u16 {
     match kind {
         DeviceKind::Plug => 2 + 2 + 1,
-        DeviceKind::TemperatureSensor => 2 + 3 + 2,
+        DeviceKind::TemperatureSensor | DeviceKind::LeakSensor => 2 + 3 + 2,
         DeviceKind::Thermostat => 2 + 5 + 2,
     }
 }

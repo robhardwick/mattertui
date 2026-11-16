@@ -17,7 +17,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use super::{btop_box, current, fmt_temp, health_badge, label_row, metric_graph, meter_row, trend};
+use super::{btop_box, current, fmt_temp, health_badge, is_leaking, label_row, metric_graph, meter_row, trend};
 use crate::config::DeviceKind;
 use crate::state::{Metric, unix_minute};
 use crate::ui::app::{App, Health};
@@ -86,6 +86,7 @@ enum Info {
     Humidity,
     Battery,
     Power,
+    Water,
     Link,
 }
 
@@ -96,6 +97,7 @@ fn info_rows(app: &App, device: usize) -> Vec<Info> {
     let rows: &[Info] = match app.config.devices[device].kind {
         DeviceKind::Plug => &[Info::Power, Info::Link],
         DeviceKind::TemperatureSensor => &[Info::Temp, Info::Humidity, Info::Battery],
+        DeviceKind::LeakSensor => &[Info::Water, Info::Battery, Info::Link],
         DeviceKind::Thermostat => &[Info::Temp, Info::Setpoint, Info::State, Info::Humidity, Info::Battery],
     };
     rows.iter()
@@ -149,11 +151,19 @@ fn draw_info(app: &App, device: usize, info: Info, area: Rect, buf: &mut Buffer)
                 None => ("—", t.dim()),
             };
             let mut spans = vec![];
-            if let Some(since) = on_since(app, device) {
+            if let Some(since) = since(app, device, Metric::On) {
                 spans.push(Span::styled(format!("for {since}  "), t.muted()));
             }
             spans.push(Span::styled(text, value_style(app, device, colour)));
             label_row(app, area, buf, "Power", Line::from(spans));
+        }
+        Info::Water => {
+            let mut spans = vec![];
+            if let Some(since) = since(app, device, Metric::Leak) {
+                spans.push(Span::styled(format!("for {since}  "), t.muted()));
+            }
+            spans.push(leak_state(app, device));
+            label_row(app, area, buf, "Water", Line::from(spans));
         }
         Info::Link => {
             let link = d.info.as_ref().map_or("", |i| transport_name(i.transport));
@@ -255,11 +265,21 @@ fn state(app: &App, device: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// How long a plug has been in its current state, from history.
-fn on_since(app: &App, device: usize) -> Option<String> {
+/// `LEAK` (alarm colours) or `dry`.
+fn leak_state(app: &App, device: usize) -> Span<'static> {
+    let t = &app.theme;
+    match current(&app.devices[device], Metric::Leak) {
+        Some(v) if v != 0.0 => Span::styled("LEAK", Style::new().fg(t.bad()).add_modifier(Modifier::BOLD)),
+        Some(_) => Span::styled("dry", value_style(app, device, t.title())),
+        None => Span::styled("—", t.muted()),
+    }
+}
+
+/// How long an on/off state (a plug, a leak) has held, from history.
+fn since(app: &App, device: usize, metric: Metric) -> Option<String> {
     let d = &app.devices[device];
-    let now_v = current(d, Metric::On)?;
-    let h = d.history.get(&Metric::On)?;
+    let now_v = current(d, metric)?;
+    let h = d.history.get(&metric)?;
     let changed = h.buckets().filter(|b| b.last != now_v).last()?;
     let mins = unix_minute() - changed.minute;
     Some(match mins {
@@ -269,11 +289,12 @@ fn on_since(app: &App, device: usize) -> Option<String> {
     })
 }
 
-/// The graph a device shows: temperature (with setpoint), or on/off.
+/// The graph a device shows: temperature (with setpoint), on/off, or wet/dry.
 fn graph_metric(app: &App, device: usize) -> (Metric, Option<Metric>) {
     match app.config.devices[device].kind {
         DeviceKind::Plug => (Metric::On, None),
         DeviceKind::TemperatureSensor => (Metric::Temperature, None),
+        DeviceKind::LeakSensor => (Metric::Leak, None),
         DeviceKind::Thermostat => (Metric::Temperature, Some(Metric::HeatSetpoint)),
     }
 }
@@ -288,7 +309,7 @@ fn boxed(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     let h = super::device_hue(app, device);
     let full = t.ink(h);
     let base = if selected { full } else { t.shade(h, 0.3) };
-    let colour = mix(base, full, app.flash(device));
+    let colour = if is_leaking(&app.devices[device]) { t.bad() } else { mix(base, full, app.flash(device)) };
     ratatui::widgets::Clear.render(area, buf);
     let inner = btop_box(app, area, buf, colour, vec![title(app, device)], vec![status(app, device)]);
     if inner.is_empty() {
@@ -348,6 +369,8 @@ fn featured(app: &App, device: usize, full: Rect, buf: &mut Buffer) {
     if kind == DeviceKind::Plug {
         let on = current(d, Metric::On).is_some_and(|v| v != 0.0);
         spans.push(Span::styled(if on { "ON" } else { "off" }, value_style(app, device, if on { super::glow(app) } else { t.dim() })));
+    } else if kind == DeviceKind::LeakSensor {
+        spans.push(leak_state(app, device));
     } else {
         spans.extend(temperature(app, device).spans);
         if kind == DeviceKind::Thermostat {
@@ -402,6 +425,7 @@ fn row_variant(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
             Some(_) => Span::styled("off", t.muted()),
             None => Span::styled("—", t.muted()),
         },
+        (_, DeviceKind::LeakSensor) => leak_state(app, device),
         _ => match app.shown(device, Metric::Temperature) {
             Some(c) => Span::styled(fmt_temp_c(app, c), value_style(app, device, t.title())),
             None => Span::styled("—", t.muted()),
@@ -424,7 +448,7 @@ fn row_variant(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     if let Some(h) = d.history.get(&m) {
         let samples =
             series::sample(h, unix_minute(), super::span(app, h), Graph::samples_for(g.width, t.ascii), super::continuous(m));
-        let range = if m == Metric::On {
+        let range = if m.binary() {
             Some((0.0, 1.0))
         } else {
             graph::range(samples.iter().flatten().copied(), 1.5)

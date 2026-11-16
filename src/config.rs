@@ -134,6 +134,7 @@ pub enum DeviceKind {
     Plug,
     Thermostat,
     TemperatureSensor,
+    LeakSensor,
 }
 
 impl Config {

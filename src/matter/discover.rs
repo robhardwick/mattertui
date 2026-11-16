@@ -17,6 +17,7 @@ pub const THERMOSTAT: u32 = 0x0201;
 pub const TEMPERATURE: u32 = 0x0402;
 pub const HUMIDITY: u32 = 0x0405;
 pub const POWER_SOURCE: u32 = 0x002F;
+pub const BOOLEAN_STATE: u32 = 0x0045;
 pub const FEATURE_MAP: u32 = 0xFFFC;
 pub const ATTRIBUTE_LIST: u32 = 0xFFFB;
 
@@ -56,6 +57,7 @@ pub async fn discover(
         DeviceKind::Plug => ON_OFF,
         DeviceKind::Thermostat => THERMOSTAT,
         DeviceKind::TemperatureSensor => TEMPERATURE,
+        DeviceKind::LeakSensor => BOOLEAN_STATE,
     };
     let mut wanted: Vec<(u16, u32, &[u32])> = vec![(
         endpoint,
@@ -66,9 +68,11 @@ pub async fn discover(
             // SystemMode, RunningState
             DeviceKind::Thermostat => &[0x0000, 0x0008, 0x0011, 0x0012, 0x001C, 0x0029],
             DeviceKind::TemperatureSensor => &[0x0000],
+            // StateValue: true while water is detected.
+            DeviceKind::LeakSensor => &[0x0000],
         },
     )];
-    if kind != DeviceKind::Plug
+    if matches!(kind, DeviceKind::Thermostat | DeviceKind::TemperatureSensor)
         && let Some(ep) = first_with_server(&endpoints, HUMIDITY, endpoint)
     {
         wanted.push((ep, HUMIDITY, &[0x0000]));
@@ -199,6 +203,8 @@ fn choose_endpoint(endpoints: &[Endpoint], kind: DeviceKind) -> Result<u16> {
         DeviceKind::Plug => (&[0x010A, 0x010B, 0x0100, 0x0101], ON_OFF),
         DeviceKind::Thermostat => (&[0x0301], THERMOSTAT),
         DeviceKind::TemperatureSensor => (&[0x0302], TEMPERATURE),
+        // Water Leak Detector
+        DeviceKind::LeakSensor => (&[0x0043], BOOLEAN_STATE),
     };
     endpoints
         .iter()
@@ -292,6 +298,14 @@ mod tests {
     fn falls_back_to_server_cluster() {
         let eps = [ep(0, &[0x16], &[]), ep(2, &[0xFFFF], &[0x0402])];
         assert_eq!(choose_endpoint(&eps, DeviceKind::TemperatureSensor).unwrap(), 2);
+    }
+
+    /// The IKEA KLIPPBOK, as probed.
+    #[test]
+    fn picks_leak_detector_endpoint() {
+        let eps = [ep(0, &[0x12, 0x11, 0x16], &[0x1D, 0x2F]), ep(1, &[0x43], &[0x03, 0x1D, 0x45, 0x80])];
+        assert_eq!(choose_endpoint(&eps, DeviceKind::LeakSensor).unwrap(), 1);
+        assert_eq!(first_with_server(&eps, POWER_SOURCE, 1), Some(0));
     }
 
     #[test]

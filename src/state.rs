@@ -29,12 +29,19 @@ pub enum Metric {
     BatteryLevel,
     /// Thermostat heating demand %, 0–100 (PIHeatingDemand).
     HeatDemand,
+    /// Water leak detected (1.0) or dry (0.0).
+    Leak,
 }
 
 impl Metric {
     /// Metrics that get a history ring (and so a graph).
     pub fn graphed(self) -> bool {
         !matches!(self, Metric::Mode | Metric::BatteryLevel)
+    }
+
+    /// On/off states, graphed on a fixed 0–1 scale.
+    pub fn binary(self) -> bool {
+        matches!(self, Metric::On | Metric::Running | Metric::Leak)
     }
 }
 

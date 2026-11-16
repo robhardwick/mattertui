@@ -42,6 +42,11 @@ pub fn is_heating(d: &DeviceState) -> bool {
         && (current(d, Metric::Running).is_some_and(|r| r as u64 & 1 != 0) || on(Metric::HeatDemand))
 }
 
+/// Whether a leak sensor currently detects water.
+pub fn is_leaking(d: &DeviceState) -> bool {
+    current(d, Metric::Leak).is_some_and(|v| v != 0.0)
+}
+
 pub fn current(d: &DeviceState, m: Metric) -> Option<f64> {
     d.current.get(&m).copied().flatten()
 }
@@ -108,7 +113,7 @@ type Samples = Vec<Option<f64>>;
 /// Measurements that change smoothly (interpolated across gaps), as opposed
 /// to states and settings (drawn as steps).
 pub fn continuous(metric: Metric) -> bool {
-    !matches!(metric, Metric::On | Metric::Running | Metric::Mode | Metric::HeatSetpoint | Metric::CoolSetpoint)
+    !(metric.binary() || matches!(metric, Metric::Mode | Metric::HeatSetpoint | Metric::CoolSetpoint))
 }
 
 /// A room's hue: its configured `accent`, else the next in the cycle.
@@ -184,7 +189,7 @@ fn graph_samples(app: &App, device: usize, metric: Metric, overlay: Option<Metri
 /// The value range a graph of `metric` uses at this width.
 pub fn metric_range(app: &App, device: usize, metric: Metric, overlay: Option<Metric>, width: u16) -> Option<(f64, f64)> {
     let (samples, over) = graph_samples(app, device, metric, overlay, width)?;
-    if matches!(metric, Metric::On | Metric::Running) {
+    if metric.binary() {
         // Fixed scale so "on" always reaches the top.
         return samples.iter().any(Option::is_some).then_some((0.0, 1.0));
     }
@@ -235,7 +240,7 @@ pub fn metric_graph(app: &App, device: usize, metric: Metric, overlay: Option<Me
     // Scale labels; on/off graphs speak for themselves.
     if area.height >= 3
         && area.width >= 20
-        && !matches!(metric, Metric::On | Metric::Running)
+        && !metric.binary()
         && let Some((lo, hi)) = metric_range(app, device, metric, overlay, area.width)
     {
         let fmt = |v: f64| match metric {

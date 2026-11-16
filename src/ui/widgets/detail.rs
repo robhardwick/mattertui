@@ -123,7 +123,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         .into_iter()
         .filter(|m| d.history.contains_key(m))
         .collect();
-    let switches: Vec<Metric> = [Metric::On, Metric::Running]
+    let switches: Vec<Metric> = [Metric::On, Metric::Running, Metric::Leak]
         .into_iter()
         .filter(|m| d.history.contains_key(m))
         .collect();
@@ -157,6 +157,7 @@ fn metric_name(m: Metric) -> &'static str {
         Metric::HeatDemand => "heating demand",
         Metric::On => "power",
         Metric::Running => "heating",
+        Metric::Leak => "water",
         _ => "",
     }
 }
@@ -170,11 +171,13 @@ fn metric_box(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Buffer)
     let d = &app.devices[device];
     let mut right = vec![];
     match m {
-        Metric::On | Metric::Running => {
+        Metric::On | Metric::Running | Metric::Leak => {
             let now = current(d, m).unwrap_or(0.0) as u64;
             let (text, colour) = match m {
                 Metric::On if now != 0 => ("on", super::glow(app)),
                 Metric::On => ("off", t.dim()),
+                Metric::Leak if now != 0 => ("LEAK", t.bad()),
+                Metric::Leak => ("dry", t.dim()),
                 _ if now & 1 != 0 => ("heating", super::flame(app)),
                 _ => ("idle", t.dim()),
             };
@@ -223,6 +226,7 @@ fn graph_with_axes(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Bu
     if let Some((lo, hi)) = super::metric_range(app, device, m, overlay, plot.width) {
         let fmt = |v: f64| match m {
             Metric::Temperature => fmt_temp(app, v),
+            Metric::Leak => (if v >= 0.5 { "leak" } else { "dry" }).to_string(),
             Metric::On | Metric::Running => (if v >= 0.5 { "on" } else { "off" }).to_string(),
             _ => format!("{v:.0}%"),
         };
