@@ -7,8 +7,8 @@
 //! - Inside a room, every device is its own box; boxes stretch to fill the
 //!   room, so taller terminals mean taller graphs.
 //! - A **featured** device fills its room like btop's CPU box: its graph
-//!   takes the room and the other devices stack as boxes in a column on the
-//!   right, like btop's per-core panel.
+//!   takes the whole room and the other devices float over its top-right as
+//!   boxes at their natural height, like btop's per-core panel.
 //! - If the minimum sizes don't fit, featured rooms fall back to plain boxes,
 //!   then devices become one-line rows inside their room box (like btop's
 //!   core list), and finally the caller scrolls.
@@ -90,6 +90,16 @@ pub fn min_height(kind: DeviceKind, variant: Variant) -> u16 {
         Variant::Boxed => 2 + min_info_rows(kind) + 1,
         // info line + gauge/meter line + three graph rows
         Variant::Featured => 5,
+    }
+}
+
+/// Height a box floating over a featured graph takes: all its info rows and
+/// a short graph. Floating boxes don't stretch.
+pub fn natural_height(kind: DeviceKind) -> u16 {
+    match kind {
+        DeviceKind::Plug => 2 + 2 + 1,
+        DeviceKind::TemperatureSensor => 2 + 3 + 2,
+        DeviceKind::Thermostat => 2 + 5 + 2,
     }
 }
 
@@ -334,17 +344,30 @@ fn place_room(room_idx: usize, room: &RoomSpec, rect: Rect, density: Density) ->
             }
         }
         Shape::Featured { featured, side } => {
-            let side_w = if side.is_empty() { 0 } else { (inner.width * 2 / 5).clamp(MIN_BOX_WIDTH, 48) };
-            let graph_w = inner.width.saturating_sub(side_w + u16::from(side_w > 0));
+            // The graph spans the room; other devices float over its
+            // top-right at their natural height (or minimum, if tight).
             out.push(PlacedTile {
                 room: room_idx,
                 tile: featured,
-                rect: Rect::new(inner.x + 1, inner.y, graph_w.saturating_sub(1), inner.height),
+                rect: Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), inner.height),
                 variant: Variant::Featured,
             });
-            if side_w > 0 {
-                let side_area = Rect::new(inner.right() - side_w, inner.y, side_w, inner.height);
-                stack(room_idx, room, &side, side_area, &mut out);
+            if !side.is_empty() {
+                let side_w = (inner.width * 2 / 5).clamp(MIN_BOX_WIDTH, 48);
+                let natural: u16 = side.iter().map(|&i| natural_height(room.tiles[i].kind)).sum();
+                let fits = natural <= inner.height;
+                let mut y = inner.y;
+                for &i in &side {
+                    let kind = room.tiles[i].kind;
+                    let h = if fits { natural_height(kind) } else { min_height(kind, Variant::Boxed) };
+                    out.push(PlacedTile {
+                        room: room_idx,
+                        tile: i,
+                        rect: Rect::new(inner.right() - side_w, y, side_w, h),
+                        variant: Variant::Boxed,
+                    });
+                    y += h;
+                }
             }
         }
     }
@@ -417,7 +440,9 @@ mod tests {
         }
         for (i, a) in l.tiles.iter().enumerate() {
             for b in &l.tiles[i + 1..] {
-                assert!(!a.rect.intersects(b.rect), "tiles overlap: {a:?} {b:?}");
+                // Boxes float over their room's featured graph by design.
+                let floating = a.room == b.room && (a.variant == Variant::Featured || b.variant == Variant::Featured);
+                assert!(floating || !a.rect.intersects(b.rect), "tiles overlap: {a:?} {b:?}");
             }
             let room = l.rooms.iter().find(|r| r.room == a.room).unwrap().rect;
             assert!(a.rect.x > room.x && a.rect.right() < room.right(), "tile outside room horizontally: {a:?} in {room:?}");
@@ -448,8 +473,12 @@ mod tests {
         let featured = l.tiles.iter().find(|t| t.variant == Variant::Featured).unwrap();
         let others: Vec<_> = l.tiles.iter().filter(|t| t.variant == Variant::Boxed).collect();
         assert_eq!(others.len(), 2);
-        assert!(others.iter().all(|t| t.rect.x > featured.rect.right()), "side column is to the right");
         assert_eq!(featured.rect.height, area.height - 2, "graph fills the room's height");
+        assert!(others.iter().all(|t| featured.rect.contains(t.rect.as_position())), "boxes float over the graph");
+        assert!(others.iter().all(|t| t.rect.right() == featured.rect.right() + 1), "at the top-right");
+        // Natural height, not stretched to fill the room.
+        assert_eq!(others[0].rect.height, natural_height(Plug));
+        assert_eq!(others[1].rect.height, natural_height(TemperatureSensor));
     }
 
     #[test]
@@ -459,6 +488,7 @@ mod tests {
         let h = |l: &Layout, room, tile| l.tiles.iter().find(|t| t.room == room && t.tile == tile).unwrap().rect.height;
         assert!(h(&tall, 0, 1) > h(&short, 0, 1), "featured grows");
         assert!(h(&tall, 1, 0) > h(&short, 1, 0), "boxes grow");
+        assert_eq!(h(&tall, 0, 0), h(&short, 0, 0), "floating boxes don't");
     }
 
     #[test]

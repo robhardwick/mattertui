@@ -72,6 +72,8 @@ pub struct App {
     announced: HashMap<usize, f64>,
     /// Devices that went offline after being live (for "back online").
     lost: std::collections::HashSet<usize>,
+    /// Where completed history minutes are saved, if available.
+    history: Option<crate::history::HistoryStore>,
 }
 
 #[derive(Debug)]
@@ -156,6 +158,7 @@ impl App {
             ticker_scrolling: false,
             announced: HashMap::new(),
             lost: Default::default(),
+            history: None,
         }
     }
 
@@ -225,7 +228,12 @@ impl App {
             AppEvent::Device { id, update } => {
                 if let Some(i) = self.device_index(&id) {
                     self.note_update(i, &update);
-                    self.devices[i].apply(update);
+                    if let Some((metric, bucket)) = self.devices[i].apply(update)
+                        && let Some(store) = &self.history
+                        && let Err(e) = store.append(&id, metric, &bucket)
+                    {
+                        tracing::debug!(device = id, error = %e, "couldn't save history");
+                    }
                 }
             }
             AppEvent::Paired { id, result } => {
@@ -252,6 +260,30 @@ impl App {
                     Err(e) => (false, e),
                 };
                 self.finish_modal(i, ModalKind::Unpair, ok, message);
+            }
+        }
+    }
+
+    /// Load saved graph history and keep saving to `store`.
+    pub fn attach_history(&mut self, store: crate::history::HistoryStore) {
+        for (i, d) in self.config.devices.iter().enumerate() {
+            match store.load(d.id.get_ref()) {
+                Ok(saved) if !saved.is_empty() => self.devices[i].restore(saved),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(device = d.id.get_ref().as_str(), error = %e, "couldn't load history"),
+            }
+        }
+        self.history = Some(store);
+    }
+
+    /// Save the minutes still in progress (on quit).
+    pub fn flush_history(&self) {
+        let Some(store) = &self.history else { return };
+        for (cfg, d) in self.config.devices.iter().zip(&self.devices) {
+            for (metric, h) in &d.history {
+                if let Some(b) = h.last() {
+                    let _ = store.append(cfg.id.get_ref(), *metric, b);
+                }
             }
         }
     }

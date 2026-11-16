@@ -18,9 +18,11 @@ pub struct Graph<'a> {
     pub samples: &'a [Option<f64>],
     pub lo: f64,
     pub hi: f64,
-    /// Colour for a cell row, given the value at that row's middle.
+    /// Colour for a cell row, given its height (0 = baseline, 1 = top).
     pub colour: &'a dyn Fn(f64) -> Color,
-    /// A line drawn on top (e.g. a thermostat setpoint), with its colour.
+    /// A thin line (e.g. a thermostat setpoint), with its colour. Above the
+    /// fill it's drawn as dots; through the fill it's carved as a one-dot gap,
+    /// so it reads as one continuous line.
     pub overlay: Option<(&'a [Option<f64>], Color)>,
     pub ascii: bool,
 }
@@ -48,22 +50,25 @@ impl Graph<'_> {
         for cy in 0..area.height as usize {
             // Dot rows covered by this cell, counted from the baseline.
             let base = (area.height as usize - 1 - cy) * 4;
-            let mid = self.lo + (self.hi - self.lo) * ((base as f64 + 2.0) / rows as f64);
+            let frac = (base as f64 + 2.0) / rows as f64;
             for cx in 0..area.width as usize {
                 let mut bits = 0u8;
-                let mut overlay_hit = false;
+                let mut line_above_fill = false;
                 for (side, dots) in [(0, LEFT), (1, RIGHT)] {
                     let s = cx * 2 + side;
                     let fill = self.samples.get(s).copied().flatten().map(level);
                     let line = self.overlay.and_then(|(o, _)| o.get(s).copied().flatten()).map(line_level);
                     for (dy, bit) in dots.iter().enumerate() {
                         let dot = base + (3 - dy); // dot row from the baseline
-                        if fill.is_some_and(|f| dot < f) {
-                            bits |= bit;
-                        }
+                        let filled = fill.is_some_and(|f| dot < f);
                         if line == Some(dot) {
+                            if filled {
+                                continue; // carve a gap through the fill
+                            }
                             bits |= bit;
-                            overlay_hit = true;
+                            line_above_fill = true;
+                        } else if filled {
+                            bits |= bit;
                         }
                     }
                 }
@@ -71,8 +76,8 @@ impl Graph<'_> {
                     continue;
                 }
                 let colour = match self.overlay {
-                    Some((_, c)) if overlay_hit => c,
-                    _ => (self.colour)(mid),
+                    Some((_, c)) if line_above_fill => c,
+                    _ => (self.colour)(frac),
                 };
                 let ch = char::from_u32(0x2800 + u32::from(bits)).unwrap_or(' ');
                 buf[(area.x + cx as u16, area.y + cy as u16)]
@@ -90,10 +95,10 @@ impl Graph<'_> {
             for cy in 0..rows {
                 let from_base = rows - 1 - cy;
                 if from_base < filled {
-                    let mid = self.lo + (self.hi - self.lo) * ((from_base as f64 + 0.5) / rows as f64);
+                    let frac = (from_base as f64 + 0.5) / rows as f64;
                     buf[(area.x + cx as u16, area.y + cy as u16)]
                         .set_char(if from_base + 1 == filled { '.' } else { ':' })
-                        .set_style(Style::new().fg((self.colour)(mid)));
+                        .set_style(Style::new().fg((self.colour)(frac)));
                 }
             }
         }
@@ -166,9 +171,10 @@ mod tests {
     }
 
     #[test]
-    fn gaps_and_overlay() {
+    fn overlay_is_dots_above_and_a_gap_through_the_fill() {
         let samples = [None, None, Some(4.0), Some(4.0)];
-        let line = [Some(6.0); 4];
+        // Line at 2 is inside the right cell's fill (level 4).
+        let line = [Some(2.0); 4];
         let g = Graph {
             samples: &samples,
             lo: 0.0,
@@ -177,11 +183,13 @@ mod tests {
             overlay: Some((&line, Color::Red)),
             ascii: false,
         };
-        // No fill where there's no data, but the overlay line spans it.
-        insta::assert_snapshot!(draw(&g, 2, 2), @r"
-        ⠤⠤
-         ⣿
-        ");
+        // Left: dots where there's no data. Right: full cell minus the line's
+        // dot row (⣿ with ⠤ removed is ⣛).
+        assert_eq!(draw(&g, 2, 2), "  \n⠤⣛");
+        // A line above the fill is drawn as dots.
+        let high = [Some(6.0); 4];
+        let g = Graph { overlay: Some((&high, Color::Red)), ..g };
+        assert_eq!(draw(&g, 2, 2), "⠤⠤\n ⣿");
     }
 
     #[test]

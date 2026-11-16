@@ -11,6 +11,8 @@ pub struct Paths {
     #[allow(dead_code)] // read by config loading in milestone 2
     pub config_file: PathBuf,
     pub data_dir: PathBuf,
+    /// Disposable data: graph history.
+    pub cache_dir: PathBuf,
 }
 
 impl Paths {
@@ -24,15 +26,21 @@ impl Paths {
                 .join("config.toml"),
         };
         let data_dir = xdg_dir("XDG_DATA_HOME", ".local/share")?.join("mattertui");
+        let cache_dir = xdg_dir("XDG_CACHE_HOME", ".cache")?.join("mattertui");
         Ok(Self {
             config_file,
             data_dir,
+            cache_dir,
         })
     }
 
     /// The matter-controller snapshot (fabric keys + paired nodes).
     pub fn store(&self) -> PathBuf {
         self.data_dir.join("controller.bin")
+    }
+
+    pub fn history_dir(&self) -> PathBuf {
+        self.cache_dir.join("history")
     }
 
     pub fn roots_dir(&self) -> PathBuf {

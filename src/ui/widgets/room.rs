@@ -10,6 +10,7 @@ use super::{btop_box, current, fmt_temp};
 use crate::config::DeviceKind;
 use crate::state::Metric;
 use crate::ui::app::App;
+use crate::ui::icons;
 
 const SUPERSCRIPT: [&str; 9] = ["¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"];
 
@@ -28,6 +29,9 @@ pub fn render(app: &App, room: usize, area: Rect, buf: &mut Buffer) {
     let mut title = Vec::new();
     if let Some(n) = SUPERSCRIPT.get(room) {
         title.push(Span::styled(*n, t.bold(t.hi())));
+    }
+    if let Some(g) = icons::glyph(cfg.icon.as_ref().map(|i| i.get_ref().as_str()), None, t.ascii) {
+        title.push(Span::styled(format!("{g} "), Style::new().fg(colour)));
     }
     title.push(Span::styled(cfg.name.clone(), t.bold(t.title())));
 
@@ -61,16 +65,19 @@ fn summary(app: &App, devices: &[usize]) -> Vec<Vec<Span<'static>>> {
     };
     let mut items = Vec::new();
     if let Some(c) = mean(Metric::Temperature) {
-        items.push(vec![Span::styled(fmt_temp(app, c), t.bold(t.temperature(c)))]);
+        items.push(vec![Span::styled(fmt_temp(app, c), t.bold(t.title()))]);
     }
     if let Some(h) = mean(Metric::Humidity) {
-        items.push(vec![Span::styled(format!("{h:.0}%"), t.bold(t.humidity(h)))]);
+        items.push(vec![
+            Span::styled(format!("{} ", icons::get("humidity", t.ascii)), t.muted()),
+            Span::styled(format!("{h:.0}%"), t.bold(t.title())),
+        ]);
     }
     let plugs: Vec<usize> = devices.iter().copied().filter(|&i| app.config.devices[i].kind == DeviceKind::Plug).collect();
     if !plugs.is_empty() {
         let on = plugs.iter().filter(|&&i| current(&app.devices[i], Metric::On) == Some(1.0)).count();
         items.push(vec![
-            Span::styled("lights ", t.muted()),
+            Span::styled(format!("{} ", icons::get("lamp", t.ascii)), if on > 0 { Style::new().fg(super::glow(app)) } else { t.muted() }),
             Span::styled(format!("{on}/{}", plugs.len()), t.bold(if on > 0 { super::glow(app) } else { t.dim() })),
         ]);
     }
@@ -79,7 +86,7 @@ fn summary(app: &App, devices: &[usize]) -> Vec<Vec<Span<'static>>> {
         current(d, Metric::Running).is_some_and(|r| r as u64 & 1 != 0) || current(d, Metric::HeatDemand).is_some_and(|p| p > 0.0)
     });
     if heating {
-        items.push(vec![Span::styled("heating", Style::new().fg(super::flame(app)))]);
+        items.push(vec![Span::styled(format!("{} heating", icons::get("heating", t.ascii)), Style::new().fg(super::flame(app)))]);
     }
     items
 }

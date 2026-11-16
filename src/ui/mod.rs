@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod graph;
+pub mod icons;
 pub mod layout;
 pub mod motion;
 pub mod series;
@@ -43,6 +44,11 @@ pub async fn run(paths: &Paths, config: Config, logs: Arc<LogBuffer>) -> Result<
     let (tx, rx) = mpsc::channel::<AppEvent>(1024);
     let mut app = App::new(config, logs, Theme::detect());
     app.can_pair = ctl.can_commission;
+    let capacity = app.config.ui.history_hours as usize * 60;
+    match crate::history::HistoryStore::open(paths.history_dir(), capacity) {
+        Ok(store) => app.attach_history(store),
+        Err(e) => tracing::warn!(error = %e, "graph history won't be saved"),
+    }
     let mut rt = Runtime {
         ctl,
         tx,
@@ -74,6 +80,7 @@ pub async fn run(paths: &Paths, config: Config, logs: Arc<LogBuffer>) -> Result<
     let mut terminal = ratatui::try_init()?;
     let result = event_loop(&mut terminal, &mut app, &mut rt, rx).await;
     ratatui::restore();
+    app.flush_history();
     result
 }
 

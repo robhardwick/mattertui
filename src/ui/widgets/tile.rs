@@ -25,6 +25,8 @@ use crate::ui::graph::{self, Graph};
 use crate::ui::layout::{Variant, min_info_rows};
 use crate::ui::motion::mix;
 use crate::ui::series;
+use crate::ui::theme::{BATTERY, HUMIDITY, TEMPERATURE};
+use crate::ui::icons;
 
 pub fn render(app: &App, device: usize, variant: Variant, colour: Color, area: Rect, buf: &mut Buffer) {
     if area.is_empty() {
@@ -54,7 +56,11 @@ fn value_style(app: &App, device: usize, colour: Color) -> Style {
 /// selected.
 fn title(app: &App, device: usize) -> Span<'static> {
     let t = &app.theme;
-    let name = app.config.devices[device].name.clone();
+    let cfg = &app.config.devices[device];
+    let name = match icons::glyph(cfg.icon.as_ref().map(|i| i.get_ref().as_str()), Some(icons::default_for(cfg.kind)), t.ascii) {
+        Some(g) => format!("{g} {}", cfg.name),
+        None => cfg.name.clone(),
+    };
     if device == app.selected {
         Span::styled(name, Style::new().fg(t.title()).bg(t.selected_bg()).add_modifier(Modifier::BOLD))
     } else {
@@ -117,18 +123,18 @@ fn draw_info(app: &App, device: usize, info: Info, area: Rect, buf: &mut Buffer)
                 buf,
                 "Humidity",
                 h / 100.0,
-                &|p| t.humidity(p * 100.0),
-                Line::styled(format!("{h:.0}%"), value_style(app, device, t.humidity(h))),
+                &|p| t.graph(HUMIDITY, p),
+                Line::styled(format!("{h:.0}%"), value_style(app, device, t.title())),
             );
         }
         Info::Battery => {
             if let Some(b) = current(d, Metric::Battery) {
-                let colour = if b < 20.0 { t.bad() } else { t.good() };
-                meter_row(app, area, buf, "Battery", b / 100.0, &|p| t.graph(1.0 - p), Line::styled(format!("{b:.0}%"), value_style(app, device, colour)));
+                let colour = if b < 20.0 { t.bad() } else { t.title() };
+                meter_row(app, area, buf, "Battery", b / 100.0, &|p| t.graph(BATTERY, p), Line::styled(format!("{b:.0}%"), value_style(app, device, colour)));
             } else {
                 // Devices without a percentage report a charge level instead.
                 let (text, colour) = match current(d, Metric::BatteryLevel).map_or(0, |l| l as u8) {
-                    0 => ("ok", t.good()),
+                    0 => ("ok", t.title()),
                     1 => ("low", t.warn()),
                     _ => ("replace", t.bad()),
                 };
@@ -163,7 +169,7 @@ fn temperature(app: &App, device: usize) -> Line<'static> {
     match app.shown(device, Metric::Temperature) {
         Some(c) => Line::from(vec![
             Span::styled(format!("{} ", trend(d.history.get(&Metric::Temperature), c, unix_minute())), t.muted()),
-            Span::styled(fmt_temp_c(app, c), value_style(app, device, t.temperature(c))),
+            Span::styled(fmt_temp_c(app, c), value_style(app, device, t.title())),
         ]),
         None => Line::styled("—", t.muted()),
     }
@@ -201,7 +207,7 @@ fn setpoint_row(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     };
     let temp = app.shown(device, Metric::Temperature);
     let frac = temp.map_or(0.0, |c| (c - lo) / (hi - lo));
-    let meter = meter_row(app, area, buf, "Setpoint", frac, &|p| t.temperature(lo + (hi - lo) * p), value);
+    let meter = meter_row(app, area, buf, "Setpoint", frac, &|p| t.graph(TEMPERATURE, p), value);
     if meter.width < 3 {
         return;
     }
@@ -282,6 +288,7 @@ fn boxed(app: &App, device: usize, room_colour: Color, area: Rect, buf: &mut Buf
     // and briefly when the device reports.
     let base = if selected { room_colour } else { mix(t.faint(), room_colour, 0.55) };
     let colour = mix(base, room_colour, app.flash(device));
+    ratatui::widgets::Clear.render(area, buf);
     let inner = btop_box(app, area, buf, colour, vec![title(app, device)], vec![status(app, device)]);
     if inner.is_empty() {
         return;
@@ -310,10 +317,23 @@ fn boxed(app: &App, device: usize, room_colour: Color, area: Rect, buf: &mut Buf
 
 /// Fills the room like btop's CPU box: a summary line, a gauge or meter, and
 /// the graph across everything below.
-fn featured(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
+fn featured(app: &App, device: usize, full: Rect, buf: &mut Buffer) {
     let t = &app.theme;
     let kind = app.config.devices[device].kind;
     let d = &app.devices[device];
+    // Boxes float over the top-right (like btop's per-core box): text rows
+    // stop short of them; the graph runs underneath.
+    let overlay_left = app
+        .layout
+        .tiles
+        .iter()
+        .filter(|p| p.variant == Variant::Boxed && full.contains(p.rect.as_position()))
+        .map(|p| p.rect.x)
+        .min();
+    let area = match overlay_left {
+        Some(x) => Rect::new(full.x, full.y, x.saturating_sub(full.x + 1), full.height),
+        None => full,
+    };
 
     // Name, then the headline values.
     let mut spans = vec![title(app, device), Span::raw("  ")];
@@ -353,7 +373,7 @@ fn featured(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
         draw_info(app, device, Info::Humidity, row(area, 2), buf);
         graph_top = 3;
     }
-    let graph = Rect::new(area.x, area.y + graph_top, area.width, area.height.saturating_sub(graph_top));
+    let graph = Rect::new(full.x, full.y + graph_top, full.width, full.height.saturating_sub(graph_top));
     let (m, overlay) = graph_metric(app, device);
     metric_graph(app, device, m, overlay, graph, buf);
 }
@@ -364,8 +384,8 @@ fn row_variant(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     let cfg = &app.config.devices[device];
     let d = &app.devices[device];
     let name_w = (area.width / 3).clamp(6, 16);
-    let name: String = cfg.name.chars().take(name_w as usize).collect();
     let mut title = title(app, device);
+    let name: String = title.content.chars().take(name_w as usize).collect();
     title.content = name.into();
     Line::from(title).render(Rect::new(area.x, area.y, name_w, 1), buf);
 
@@ -381,7 +401,7 @@ fn row_variant(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
             None => Span::styled("—", t.muted()),
         },
         _ => match app.shown(device, Metric::Temperature) {
-            Some(c) => Span::styled(fmt_temp_c(app, c), value_style(app, device, t.temperature(c))),
+            Some(c) => Span::styled(fmt_temp_c(app, c), value_style(app, device, t.title())),
             None => Span::styled("—", t.muted()),
         },
     };
@@ -400,15 +420,16 @@ fn row_variant(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     }
     let (m, _) = graph_metric(app, device);
     if let Some(h) = d.history.get(&m) {
-        let samples = series::sample(h, unix_minute(), app.range_minutes(), Graph::samples_for(g.width, t.ascii));
+        let samples =
+            series::sample(h, unix_minute(), app.range_minutes(), Graph::samples_for(g.width, t.ascii), super::continuous(m));
         let range = if m == Metric::On {
             Some((0.0, 1.0))
         } else {
             graph::range(samples.iter().flatten().copied(), 1.5)
         };
         if let Some((lo, hi)) = range {
-            let glow = super::glow(app);
-            let colour = |v: f64| if m == Metric::On { glow } else { t.temperature(v) };
+            let p = super::palette(m);
+            let colour = |frac: f64| t.graph(p, frac);
             Graph { samples: &samples, lo, hi, colour: &colour, overlay: None, ascii: t.ascii }.render(g, buf);
         }
     }

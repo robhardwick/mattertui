@@ -97,17 +97,36 @@ pub fn health_badge(app: &App, h: Health) -> Option<(String, Color)> {
 /// One sample per graph column (or per braille dot column).
 type Samples = Vec<Option<f64>>;
 
+/// Measurements that change smoothly (interpolated across gaps), as opposed
+/// to states and settings (drawn as steps).
+pub fn continuous(metric: Metric) -> bool {
+    !matches!(metric, Metric::On | Metric::Running | Metric::Mode | Metric::HeatSetpoint | Metric::CoolSetpoint)
+}
+
+/// The graph palette for a metric.
+pub fn palette(metric: Metric) -> crate::ui::theme::Palette {
+    use crate::ui::theme::{BATTERY, HEATING, HUMIDITY, POWER, TEMPERATURE};
+    match metric {
+        Metric::Humidity => HUMIDITY,
+        Metric::On => POWER,
+        Metric::Running | Metric::HeatDemand => HEATING,
+        Metric::Battery => BATTERY,
+        _ => TEMPERATURE,
+    }
+}
+
 /// Samples for `metric` (and an overlay metric) across `width` cells.
 fn graph_samples(app: &App, device: usize, metric: Metric, overlay: Option<Metric>, width: u16) -> Option<(Samples, Samples)> {
     let d = &app.devices[device];
     let h = d.history.get(&metric)?;
     let now = crate::state::unix_minute();
     let n = Graph::samples_for(width, app.theme.ascii);
-    let samples = series::sample(h, now, app.range_minutes(), n);
+    let samples = series::sample(h, now, app.range_minutes(), n, continuous(metric));
+    // Setpoints change in steps, so they're never interpolated.
     let over = overlay
         .filter(|_| d.current.get(&Metric::Mode).copied().flatten() != Some(0.0))
         .and_then(|m| d.history.get(&m))
-        .map(|h| series::sample(h, now, app.range_minutes(), n))
+        .map(|h| series::sample(h, now, app.range_minutes(), n, false))
         .unwrap_or_default();
     Some((samples, over))
 }
@@ -143,14 +162,8 @@ pub fn metric_graph_bare(app: &App, device: usize, metric: Metric, overlay: Opti
     let Some((lo, hi)) = metric_range(app, device, metric, overlay, area.width) else {
         return false;
     };
-    let glow = glow(app);
-    let colour = |v: f64| match metric {
-        Metric::Temperature => t.temperature(v),
-        Metric::Humidity => t.humidity(v),
-        Metric::On => glow,
-        Metric::Running => t.heat(),
-        _ => t.graph((v - lo) / (hi - lo)),
-    };
+    let p = palette(metric);
+    let colour = |frac: f64| t.graph(p, frac);
     Graph {
         samples: &samples,
         lo,
@@ -163,7 +176,8 @@ pub fn metric_graph_bare(app: &App, device: usize, metric: Metric, overlay: Opti
     true
 }
 
-/// A tile graph: the bare graph plus faint scale labels at the right edge.
+/// A tile graph: the bare graph plus scale labels at the top and bottom
+/// left, as btop's net graph does.
 pub fn metric_graph(app: &App, device: usize, metric: Metric, overlay: Option<Metric>, area: Rect, buf: &mut Buffer) {
     if !metric_graph_bare(app, device, metric, overlay, area, buf) {
         return;
@@ -179,10 +193,8 @@ pub fn metric_graph(app: &App, device: usize, metric: Metric, overlay: Option<Me
             _ => format!("{v:.0}%"),
         };
         let style = Style::new().fg(app.theme.dim());
-        Line::styled(fmt(hi), style).alignment(Alignment::Right).render(Rect::new(area.x, area.y, area.width, 1), buf);
-        Line::styled(fmt(lo), style)
-            .alignment(Alignment::Right)
-            .render(Rect::new(area.x, area.bottom() - 1, area.width, 1), buf);
+        Line::styled(fmt(hi), style).render(Rect::new(area.x, area.y, area.width, 1), buf);
+        Line::styled(fmt(lo), style).render(Rect::new(area.x, area.bottom() - 1, area.width, 1), buf);
     }
 }
 

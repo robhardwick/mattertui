@@ -3,10 +3,13 @@
 use crate::state::History;
 
 /// Sample `history` into `n` evenly spaced columns covering the last
-/// `range_min` minutes up to `now_min`. Each column carries the most recent
-/// value at or before its time (devices often report only on change);
-/// `None` before the first bucket.
-pub fn sample(history: &History, now_min: i64, range_min: i64, n: usize) -> Vec<Option<f64>> {
+/// `range_min` minutes up to `now_min`; `None` before the first bucket.
+///
+/// Between two buckets, `continuous` metrics (temperature, humidity, …) are
+/// interpolated linearly, which also bridges gaps such as the app not
+/// running. Others (on/off) hold the earlier value, as a step. After the
+/// last bucket the latest value is carried forward to now.
+pub fn sample(history: &History, now_min: i64, range_min: i64, n: usize, continuous: bool) -> Vec<Option<f64>> {
     if n == 0 {
         return Vec::new();
     }
@@ -21,7 +24,15 @@ pub fn sample(history: &History, now_min: i64, range_min: i64, n: usize) -> Vec<
             current = Some(buckets[i].last);
             i += 1;
         }
-        out.push(current);
+        let v = match (current, buckets.get(i)) {
+            (Some(v), Some(next)) if continuous && i > 0 => {
+                let prev = buckets[i - 1];
+                let f = (t - prev.minute) as f64 / (next.minute - prev.minute) as f64;
+                Some(v + (next.last - v) * f)
+            }
+            _ => current,
+        };
+        out.push(v);
     }
     out
 }
@@ -67,14 +78,14 @@ mod tests {
     #[test]
     fn sample_carries_values_forward() {
         let h = hist(&[(100, 1.0), (105, 2.0)]);
-        // 10 columns over minutes 101..=110, one per minute.
-        let s = sample(&h, 110, 10, 10);
-        assert_eq!(
-            s,
-            [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0].map(Some)
-        );
+        // 10 columns over minutes 101..=110, one per minute: a step...
+        let s = sample(&h, 110, 10, 10, false);
+        assert_eq!(s, [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0].map(Some));
+        // ...or a ramp between the buckets, then carried forward.
+        let s = sample(&h, 110, 10, 10, true);
+        assert_eq!(s, [1.2, 1.4, 1.6, 1.8, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0].map(Some));
         // Before any data → None.
-        let s = sample(&h, 100, 10, 2);
+        let s = sample(&h, 100, 10, 2, true);
         assert_eq!(s, [None, Some(1.0)]);
     }
 

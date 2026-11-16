@@ -14,11 +14,15 @@ panel = "hidden"               # hidden | open — toggle with `
 height = 8
 filter = "info,mdns_sd=warn"   # tracing EnvFilter syntax; RUST_LOG overrides
 
-# Each room is a box. Colours cycle green, orange, magenta, red, blue,
-# cyan, olive; set `accent` to pick one.
+# Each room is a box in a shade of teal (teal, aqua, deep, mint, steel, sea,
+# pale); set `accent` to pick one. Icons are plain symbols, never emoji:
+#   lamp bulb plug fan tv thermostat thermometer humidity battery heating
+#   cool home sofa bed moon sun kitchen bath office desk garden tree teddy
+#   games books garage star heart snow
 [[room]]
 id = "living-room"
 name = "Living room"
+icon = "sofa"
 
 [[room]]
 id = "bedroom"

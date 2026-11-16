@@ -1,4 +1,5 @@
 mod config;
+mod history;
 mod logbuf;
 mod matter;
 mod paths;
@@ -125,12 +126,7 @@ async fn check(paths: &Paths) -> Result<()> {
         config.rooms.len(),
         config.devices.len()
     );
-    if config.ignored_icons() > 0 {
-        println!(
-            "note: `icon` is ignored now (no icons); you can remove it from {} entries",
-            config.ignored_icons()
-        );
-    }
+
     let _lock = paths.lock()?;
     let ctl = matter::open(paths, Trust::NotNeeded).await?;
     let nodes = ctl.inner.nodes().await?;

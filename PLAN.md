@@ -446,6 +446,9 @@ The app code is identical on both platforms. Only OS-level network setup differs
    the screen, one orange + teal palette, tighter alignment.
 8. **btop fidelity** (done, §13): look like btop's default theme, following
    the reference screenshot.
+9. **Polish and persistence** (§14): never-emoji icons, saved history, a
+   white/teal/orange scheme, floating boxes in featured rooms, subtle
+   gradients, and a setpoint line.
 
 ---
 
@@ -713,3 +716,47 @@ of btop's default theme.
 - **Compact mode** (when space is tight): devices become one-line rows
   inside the room box, like btop's core list. Each row is a label, a mini
   braille graph, and a value.
+
+---
+
+## 14. Milestone 9: polish and persistence
+
+**Requests (2026-11-16):**
+1. **A few icons, never emoji.** `ui/icons.rs` maps names to symbols such
+   as `☼ ≈ ≋ ⌂ ☾ ★ ▮ ◉`, every one `Emoji=No`. A test embeds Unicode's
+   BMP emoji ranges and fails on any icon, or any other UI symbol, that
+   could render as emoji. Icons appear in room and device titles and in
+   room summaries. `icon` in the config accepts names only.
+2. **History that persists.**
+   - One JSONL file per device under `$XDG_CACHE_HOME/mattertui/history/`.
+   - One line per completed minute per metric
+     (`{"m":"temperature","t":…,"lo":…,"hi":…,"v":…}`), appended as minutes
+     complete. Minutes still in progress are saved on quit.
+   - At startup each file is trimmed to `history_hours` and rewritten.
+   - JSONL via `serde_json` (already a dependency). No compact binary
+     format was in the tree, and at about 200 KB per device per day it
+     isn't needed.
+   - Gaps are interpolated when drawn: measurements as straight lines,
+     states and setpoints as steps.
+3. **Floating boxes in featured rooms.** The featured graph spans the whole
+   room, and the other devices float over its top-right at their natural
+   height, like btop's per-core box. They don't stretch.
+4. **Subtle gradients.** Each graph blends between two shades of one hue
+   by row height:
+   - lavender for temperature
+   - blue for humidity
+   - amber for power
+   - orange for heating
+   - teal for battery
+
+   Scale labels sit at the top left and bottom left.
+5. **White, teal and orange everywhere.**
+   - Values and labels are white.
+   - Structure and secondary text are teal, in shades; room boxes are
+     shades of teal.
+   - Highlights, selection, lights and heating are orange.
+   - Errors are a red-orange.
+   - Graphs and meters use the complementary palettes in item 4.
+6. **The setpoint as a thin line.** Above the data it's drawn as orange
+   braille dots. Through the fill it's carved as a one-dot gap, so it
+   reads as one continuous line.

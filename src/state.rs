@@ -5,7 +5,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// A value a device reports. Booleans and enums are stored as numbers so
 /// every metric shares one history representation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Metric {
     /// Plug on/off (1.0 / 0.0).
     On,
@@ -130,7 +131,9 @@ impl DeviceState {
         }
     }
 
-    pub fn apply(&mut self, update: DeviceUpdate) {
+    /// Apply an update. Returns a history bucket that has just completed (a
+    /// minute that's over), for persisting.
+    pub fn apply(&mut self, update: DeviceUpdate) -> Option<(Metric, Bucket)> {
         match update {
             DeviceUpdate::Status(s) => {
                 if std::mem::discriminant(&s) != std::mem::discriminant(&self.status) {
@@ -143,18 +146,27 @@ impl DeviceState {
                 self.last_report = Some(Instant::now());
                 self.current.insert(metric, value);
                 if let (Some(v), true) = (value, metric.graphed()) {
-                    self.history
+                    return self
+                        .history
                         .entry(metric)
                         .or_insert_with(|| History::new(self.history_minutes))
-                        .record(unix_minute(), v);
+                        .record(unix_minute(), v)
+                        .map(|b| (metric, b));
                 }
             }
         }
+        None
     }
+
+    /// Start from saved history (loaded at startup).
+    pub fn restore(&mut self, saved: BTreeMap<Metric, History>) {
+        self.history = saved;
+    }
+
 }
 
 /// Min/max/last of one metric within one wall-clock minute.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Bucket {
     /// Minutes since the Unix epoch.
     pub minute: i64,
@@ -179,24 +191,48 @@ impl History {
         }
     }
 
-    pub fn record(&mut self, minute: i64, value: f64) {
+    /// Record a value. Returns the previous bucket when this starts a new
+    /// minute (that minute is complete).
+    pub fn record(&mut self, minute: i64, value: f64) -> Option<Bucket> {
+        let done = self.insert(Bucket {
+            minute,
+            min: value,
+            max: value,
+            last: value,
+        });
+        self.trim(minute);
+        done
+    }
+
+    /// Merge a bucket in (same minute) or append it (later minute); older
+    /// buckets are ignored. Returns the previous bucket if one completed.
+    pub fn insert(&mut self, b: Bucket) -> Option<Bucket> {
         match self.buckets.back_mut() {
-            Some(b) if b.minute == minute => {
-                b.min = b.min.min(value);
-                b.max = b.max.max(value);
-                b.last = value;
+            Some(last) if last.minute == b.minute => {
+                last.min = last.min.min(b.min);
+                last.max = last.max.max(b.max);
+                last.last = b.last;
+                None
             }
-            _ => self.buckets.push_back(Bucket {
-                minute,
-                min: value,
-                max: value,
-                last: value,
-            }),
+            Some(last) if last.minute > b.minute => None,
+            prev => {
+                let done = prev.map(|p| *p);
+                self.buckets.push_back(b);
+                done
+            }
         }
-        let oldest_kept = minute - self.capacity_minutes as i64 + 1;
+    }
+
+    /// Drop buckets that have aged out relative to `now_minute`.
+    pub fn trim(&mut self, now_minute: i64) {
+        let oldest_kept = now_minute - self.capacity_minutes as i64 + 1;
         while self.buckets.front().is_some_and(|b| b.minute < oldest_kept) {
             self.buckets.pop_front();
         }
+    }
+
+    pub fn last(&self) -> Option<&Bucket> {
+        self.buckets.back()
     }
 
     pub fn buckets(&self) -> impl Iterator<Item = &Bucket> {
