@@ -53,6 +53,19 @@ impl LogBuffer {
         self.notify.notify_one();
     }
 
+    /// Record a notable device change (lamp on, setpoint changed, …) as an
+    /// info line attributed to `device` (its config id).
+    pub fn event(&self, device: &str, message: String) {
+        self.push(LogLine {
+            time: jiff::ZonedDateTime::now().strftime("%H:%M:%S").to_string(),
+            level: Level::INFO,
+            target: "event".into(),
+            message,
+            device: Some(device.to_string()),
+            fields: String::new(),
+        });
+    }
+
     pub fn warnings(&self) -> u64 {
         self.warnings.load(Ordering::Relaxed)
     }

@@ -28,6 +28,33 @@ pub struct Ui {
     pub temperature_unit: TemperatureUnit,
     pub motion: bool,
     pub history_hours: u32,
+    pub colors: ColorMode,
+}
+
+/// Colour depth: detected, or forced when detection gets it wrong.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+pub enum ColorMode {
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "truecolor")]
+    Truecolor,
+    #[serde(rename = "256")]
+    Indexed,
+    #[serde(rename = "16")]
+    Basic,
+}
+
+impl ColorMode {
+    pub fn forced(self) -> Option<crate::ui::theme::Depth> {
+        use crate::ui::theme::Depth;
+        match self {
+            ColorMode::Auto => None,
+            ColorMode::Truecolor => Some(Depth::Truecolor),
+            ColorMode::Indexed => Some(Depth::Indexed),
+            ColorMode::Basic => Some(Depth::Basic),
+        }
+    }
 }
 
 impl Default for Ui {
@@ -36,6 +63,7 @@ impl Default for Ui {
             temperature_unit: TemperatureUnit::Celsius,
             motion: true,
             history_hours: 24,
+            colors: ColorMode::Auto,
         }
     }
 }
@@ -94,6 +122,8 @@ pub struct Device {
     pub icon: Option<Spanned<String>>,
     #[serde(default)]
     pub featured: bool,
+    /// Pin this device's hue (otherwise the next ones after its room's).
+    pub accent: Option<Spanned<String>>,
     /// Override endpoint auto-detection.
     pub endpoint: Option<u16>,
 }
@@ -146,17 +176,8 @@ impl Config {
             if let Some(icon) = &room.icon {
                 check_icon(icon, &mut err);
             }
-            if let Some(accent) = &room.accent
-                && !crate::ui::theme::accent_names().any(|a| a == accent.get_ref())
-            {
-                err(
-                    accent.span(),
-                    format!(
-                        "unknown accent `{}` (one of: {})",
-                        accent.get_ref(),
-                        crate::ui::theme::accent_names().collect::<Vec<_>>().join(", ")
-                    ),
-                );
+            if let Some(accent) = &room.accent {
+                check_accent(accent, &mut err);
             }
         }
 
@@ -177,6 +198,9 @@ impl Config {
             if let Some(icon) = &dev.icon {
                 check_icon(icon, &mut err);
             }
+            if let Some(accent) = &dev.accent {
+                check_accent(accent, &mut err);
+            }
         }
 
         if errors.is_empty() {
@@ -188,6 +212,19 @@ impl Config {
 
     pub fn device(&self, id: &str) -> Option<&Device> {
         self.devices.iter().find(|d| d.id.get_ref() == id)
+    }
+}
+
+fn check_accent(accent: &Spanned<String>, err: &mut impl FnMut(std::ops::Range<usize>, String)) {
+    if !crate::ui::theme::hue_names().any(|a| a == accent.get_ref()) {
+        err(
+            accent.span(),
+            format!(
+                "unknown accent `{}` (one of: {})",
+                accent.get_ref(),
+                crate::ui::theme::hue_names().collect::<Vec<_>>().join(", ")
+            ),
+        );
     }
 }
 

@@ -42,7 +42,9 @@ pub async fn run(paths: &Paths, config: Config, logs: Arc<LogBuffer>) -> Result<
     }
     let ctl = matter::open(paths, Trust::IfAvailable).await?;
     let (tx, rx) = mpsc::channel::<AppEvent>(1024);
-    let mut app = App::new(config, logs, Theme::detect());
+    let theme = Theme::detect(config.ui.colors.forced());
+    tracing::info!(depth = ?theme.depth, "colour depth (set ui.colors to override)");
+    let mut app = App::new(config, logs, theme);
     app.can_pair = ctl.can_commission;
     let capacity = app.config.ui.history_hours as usize * 60;
     match crate::history::HistoryStore::open(paths.history_dir(), capacity) {
@@ -200,7 +202,7 @@ async fn event_loop(
         // second otherwise (clock, "ago" labels, staleness).
         let wait = if app.animating() {
             Duration::from_millis(33)
-        } else if app.ambient() || app.ticker_scrolling {
+        } else if app.ambient() {
             Duration::from_millis(100)
         } else {
             Duration::from_secs(1)
@@ -232,16 +234,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         0
     };
-    let [top, body, ticker, log] =
-        Rect::new(area.x, area.y, area.width, area.height).layout(&ratatui::layout::Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Fill(1),
-            Constraint::Length(1),
-            Constraint::Length(log_height),
-        ]));
+    let [top, body, log] = Rect::new(area.x, area.y, area.width, area.height).layout(&ratatui::layout::Layout::vertical([
+        Constraint::Length(chrome::TOP_HEIGHT),
+        Constraint::Fill(1),
+        Constraint::Length(log_height),
+    ]));
     let buf = frame.buffer_mut();
-    chrome::top_bar(app, top, buf);
-    app.ticker_scrolling = chrome::ticker(app, ticker, buf);
+    chrome::top_panel(app, top, buf);
     match app.view {
         View::Dashboard => dashboard(app, body, buf),
         View::Detail => detail::render(app, body, buf),
@@ -275,7 +274,7 @@ fn dashboard(app: &mut App, body: Rect, buf: &mut Buffer) {
     }
     for t in &app.layout.tiles {
         let device = app.device_at(t.room, t.tile);
-        tile::render(app, device, t.variant, room::accent(app, t.room), t.rect, &mut off);
+        tile::render(app, device, t.variant, t.rect, &mut off);
     }
     // Startup: rooms sweep in left to right, one after another, behind a
     // bright scan line in the room's accent colour.
@@ -374,7 +373,7 @@ icon = "plug"
     /// A plausible house: live readings plus an hour of history.
     pub fn fake_app() -> App {
         let config = Config::parse(CONFIG).unwrap();
-        let mut app = App::new(config, LogBuffer::new(), Theme { truecolor: true, ascii: false });
+        let mut app = App::new(config, LogBuffer::new(), Theme { depth: theme::Depth::Truecolor, ascii: false });
         let now = unix_minute();
         let live = Status::Live { max_interval_s: 60 };
         let info = |transport| DeviceInfo {
@@ -426,6 +425,16 @@ icon = "plug"
         // Snapshots must not depend on timing.
         app.motion = false;
         app
+    }
+
+    /// Notable changes logged so far: (device id, message).
+    pub fn events(app: &App) -> Vec<(String, String)> {
+        app.logs
+            .snapshot()
+            .into_iter()
+            .filter(|l| l.target == "event")
+            .map(|l| (l.device.unwrap_or_default(), l.message))
+            .collect()
     }
 
     pub fn render(app: &mut App, w: u16, h: u16) -> String {
@@ -643,7 +652,7 @@ mod motion_tests {
     }
 
     #[test]
-    fn ticker_records_notable_changes_only() {
+    fn notable_changes_are_logged() {
         let mut app = fake_app();
         reading(&mut app, "lamp", Metric::On, 0.0); // was on
         reading(&mut app, "bedside", Metric::Temperature, 17.3); // small wobble: first sample
@@ -652,10 +661,15 @@ mod motion_tests {
         app.on_app_event(AppEvent::Device { id: "heating".into(), update: DeviceUpdate::Status(Status::Offline { error: "x".into() }) });
         app.on_app_event(AppEvent::Device { id: "heating".into(), update: DeviceUpdate::Status(Status::Connecting) });
         app.on_app_event(AppEvent::Device { id: "heating".into(), update: DeviceUpdate::Status(Status::Live { max_interval_s: 60 }) });
-        let texts: Vec<_> = app.ticker.events().map(|e| e.text.clone()).collect();
         assert_eq!(
-            texts,
-            ["Heating back online", "Heating offline", "Bedside 18.0° ↑", "Floor lamp off"]
+            events(&app),
+            [
+                ("lamp", "off"),
+                ("bedside", "18.0° ↑"),
+                ("heating", "offline"),
+                ("heating", "back online"),
+            ]
+            .map(|(d, m)| (d.to_string(), m.to_string()))
         );
     }
 
@@ -670,20 +684,6 @@ mod motion_tests {
         assert_eq!(app.reveal(2), 1.0);
     }
 
-    #[test]
-    fn long_ticker_scrolls_only_with_motion() {
-        let mut app = fake_app();
-        for _ in 0..10 {
-            reading(&mut app, "lamp", Metric::On, 1.0);
-            reading(&mut app, "lamp", Metric::On, 0.0);
-        }
-        render(&mut app, 80, 24);
-        assert!(!app.ticker_scrolling);
-        app.motion = true;
-        app.epoch -= std::time::Duration::from_secs(10); // past the startup sweep
-        render(&mut app, 80, 24);
-        assert!(app.ticker_scrolling);
-    }
 }
 
 #[cfg(test)]
@@ -719,12 +719,12 @@ mod thermostat_tests {
     }
 
     #[test]
-    fn ticker_announces_setpoint_and_mode_changes() {
+    fn setpoint_and_mode_changes_are_logged() {
         let mut app = fake_app();
         reading(&mut app, Metric::HeatSetpoint, 18.0);
         reading(&mut app, Metric::Mode, 0.0);
-        let texts: Vec<_> = app.ticker.events().map(|e| e.text.clone()).collect();
-        assert_eq!(texts, ["Heating → off", "Heating set to 18.0°"]);
+        let logged: Vec<String> = super::tests_support::events(&app).into_iter().map(|(_, m)| m).collect();
+        assert_eq!(logged, ["set to 18.0°", "mode → off"]);
     }
 }
 
@@ -739,7 +739,7 @@ mod console_tests {
     fn ascii_fallback_has_no_braille_or_emoji() {
         for view in [View::Dashboard, View::Detail] {
             let mut app = fake_app();
-            app.theme = Theme { truecolor: false, ascii: true };
+            app.theme = Theme { depth: super::theme::Depth::Basic, ascii: true };
             app.view = view;
             let screen = render(&mut app, 100, 30);
             let bad: Vec<char> = screen

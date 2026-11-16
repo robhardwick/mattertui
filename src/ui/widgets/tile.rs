@@ -25,16 +25,15 @@ use crate::ui::graph::{self, Graph};
 use crate::ui::layout::{Variant, min_info_rows};
 use crate::ui::motion::mix;
 use crate::ui::series;
-use crate::ui::theme::{BATTERY, HUMIDITY, TEMPERATURE};
 use crate::ui::icons;
 
-pub fn render(app: &App, device: usize, variant: Variant, colour: Color, area: Rect, buf: &mut Buffer) {
+pub fn render(app: &App, device: usize, variant: Variant, area: Rect, buf: &mut Buffer) {
     if area.is_empty() {
         return;
     }
     match variant {
         Variant::Row => row_variant(app, device, area, buf),
-        Variant::Boxed => boxed(app, device, colour, area, buf),
+        Variant::Boxed => boxed(app, device, area, buf),
         Variant::Featured => featured(app, device, area, buf),
     }
 }
@@ -123,14 +122,14 @@ fn draw_info(app: &App, device: usize, info: Info, area: Rect, buf: &mut Buffer)
                 buf,
                 "Humidity",
                 h / 100.0,
-                &|p| t.graph(HUMIDITY, p),
+                &|p| t.graph(super::device_hue(app, device), p),
                 Line::styled(format!("{h:.0}%"), value_style(app, device, t.title())),
             );
         }
         Info::Battery => {
             if let Some(b) = current(d, Metric::Battery) {
                 let colour = if b < 20.0 { t.bad() } else { t.title() };
-                meter_row(app, area, buf, "Battery", b / 100.0, &|p| t.graph(BATTERY, p), Line::styled(format!("{b:.0}%"), value_style(app, device, colour)));
+                meter_row(app, area, buf, "Battery", b / 100.0, &|p| t.graph(super::device_hue(app, device), p), Line::styled(format!("{b:.0}%"), value_style(app, device, colour)));
             } else {
                 // Devices without a percentage report a charge level instead.
                 let (text, colour) = match current(d, Metric::BatteryLevel).map_or(0, |l| l as u8) {
@@ -207,7 +206,7 @@ fn setpoint_row(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     };
     let temp = app.shown(device, Metric::Temperature);
     let frac = temp.map_or(0.0, |c| (c - lo) / (hi - lo));
-    let meter = meter_row(app, area, buf, "Setpoint", frac, &|p| t.graph(TEMPERATURE, p), value);
+    let meter = meter_row(app, area, buf, "Setpoint", frac, &|p| t.graph(super::device_hue(app, device), p), value);
     if meter.width < 3 {
         return;
     }
@@ -281,13 +280,15 @@ fn graph_metric(app: &App, device: usize) -> (Metric, Option<Metric>) {
 
 // --- Variants -------------------------------------------------------------
 
-fn boxed(app: &App, device: usize, room_colour: Color, area: Rect, buf: &mut Buffer) {
+fn boxed(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     let t = &app.theme;
     let selected = device == app.selected;
-    // Device boxes are a dimmer shade of their room, brighter when selected
-    // and briefly when the device reports.
-    let base = if selected { room_colour } else { mix(t.faint(), room_colour, 0.55) };
-    let colour = mix(base, room_colour, app.flash(device));
+    // Each device box wears its own hue: a little quieter normally, full
+    // when selected, and briefly brighter when the device reports.
+    let h = super::device_hue(app, device);
+    let full = t.ink(h);
+    let base = if selected { full } else { t.shade(h, 0.3) };
+    let colour = mix(base, full, app.flash(device));
     ratatui::widgets::Clear.render(area, buf);
     let inner = btop_box(app, area, buf, colour, vec![title(app, device)], vec![status(app, device)]);
     if inner.is_empty() {
@@ -323,11 +324,12 @@ fn featured(app: &App, device: usize, full: Rect, buf: &mut Buffer) {
     let d = &app.devices[device];
     // Boxes float over the top-right (like btop's per-core box): text rows
     // stop short of them; the graph runs underneath.
+    // Only boxes that reach the text rows at the top matter.
     let overlay_left = app
         .layout
         .tiles
         .iter()
-        .filter(|p| p.variant == Variant::Boxed && full.contains(p.rect.as_position()))
+        .filter(|p| p.variant == Variant::Boxed && full.contains(p.rect.as_position()) && p.rect.y <= full.y + 3)
         .map(|p| p.rect.x)
         .min();
     let area = match overlay_left {
@@ -421,15 +423,15 @@ fn row_variant(app: &App, device: usize, area: Rect, buf: &mut Buffer) {
     let (m, _) = graph_metric(app, device);
     if let Some(h) = d.history.get(&m) {
         let samples =
-            series::sample(h, unix_minute(), app.range_minutes(), Graph::samples_for(g.width, t.ascii), super::continuous(m));
+            series::sample(h, unix_minute(), super::span(app, h), Graph::samples_for(g.width, t.ascii), super::continuous(m));
         let range = if m == Metric::On {
             Some((0.0, 1.0))
         } else {
             graph::range(samples.iter().flatten().copied(), 1.5)
         };
         if let Some((lo, hi)) = range {
-            let p = super::palette(m);
-            let colour = |frac: f64| t.graph(p, frac);
+            let h = super::device_hue(app, device);
+            let colour = |frac: f64| t.graph(h, frac);
             Graph { samples: &samples, lo, hi, colour: &colour, overlay: None, ascii: t.ascii }.render(g, buf);
         }
     }

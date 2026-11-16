@@ -203,7 +203,7 @@ fn metric_box(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Buffer)
             }
         }
     }
-    let colour = t.dim();
+    let colour = t.ink(super::device_hue(app, device));
     let inner = btop_box(app, area, buf, colour, vec![Span::styled(metric_name(m), t.bold(t.title()))], right);
     graph_with_axes(app, device, m, inner, buf);
 }
@@ -244,6 +244,8 @@ fn graph_with_axes(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Bu
     for x in axis.left()..axis.right() {
         buf[(x, axis.y)].set_char('─').set_style(Style::new().fg(t.faint()));
     }
-    Line::styled(format!("-{} ", app.range_label()), t.muted()).render(axis, buf);
+    // The span actually drawn (shorter than the range while history builds).
+    let shown = app.devices[device].history.get(&m).map_or(app.range_minutes(), |h| super::span(app, h));
+    Line::styled(format!("-{} ", super::fmt_span(shown)), t.muted()).render(axis, buf);
     Line::styled(" now", t.muted()).alignment(Alignment::Right).render(axis, buf);
 }

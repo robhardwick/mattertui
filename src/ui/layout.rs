@@ -20,8 +20,12 @@ use crate::config::DeviceKind;
 pub const MIN_ROOM_WIDTH: u16 = 38;
 /// Minimum width of a device box; two side by side need twice this.
 const MIN_BOX_WIDTH: u16 = 34;
-/// Inner width a featured room needs to put other devices beside the graph.
+/// Inner width a featured room needs to float other devices over the graph.
 const FEATURED_SIDE_AT: u16 = 64;
+/// Graph left showing to the right of floating boxes…
+const FLOAT_MARGIN_X: u16 = 3;
+/// …and at least this much above and below them.
+const FLOAT_MARGIN_Y: u16 = 1;
 
 #[derive(Debug, Clone)]
 pub struct RoomSpec {
@@ -259,7 +263,9 @@ fn room_min_height(room: &RoomSpec, width: u16, density: Density) -> u16 {
         Shape::Rows => room.tiles.len() as u16,
         Shape::Boxes { columns } => columns.iter().map(|c| boxes_height(room, c)).max().unwrap_or(0),
         Shape::Featured { featured, side } => {
-            min_height(room.tiles[featured].kind, Variant::Featured).max(boxes_height(room, &side))
+            // Floating boxes keep a row of graph above and below them.
+            let floating = if side.is_empty() { 0 } else { boxes_height(room, &side) + 2 * FLOAT_MARGIN_Y };
+            min_height(room.tiles[featured].kind, Variant::Featured).max(floating)
         }
     };
     inner.max(1) + 2
@@ -344,8 +350,9 @@ fn place_room(room_idx: usize, room: &RoomSpec, rect: Rect, density: Density) ->
             }
         }
         Shape::Featured { featured, side } => {
-            // The graph spans the room; other devices float over its
-            // top-right at their natural height (or minimum, if tight).
+            // The graph spans the room; other devices float over it near the
+            // right, vertically centred, with graph showing on every side
+            // (like btop's per-core box). Natural height, or minimum if tight.
             out.push(PlacedTile {
                 room: room_idx,
                 tile: featured,
@@ -355,15 +362,22 @@ fn place_room(room_idx: usize, room: &RoomSpec, rect: Rect, density: Density) ->
             if !side.is_empty() {
                 let side_w = (inner.width * 2 / 5).clamp(MIN_BOX_WIDTH, 48);
                 let natural: u16 = side.iter().map(|&i| natural_height(room.tiles[i].kind)).sum();
-                let fits = natural <= inner.height;
-                let mut y = inner.y;
-                for &i in &side {
-                    let kind = room.tiles[i].kind;
-                    let h = if fits { natural_height(kind) } else { min_height(kind, Variant::Boxed) };
+                let fits = natural + 2 * FLOAT_MARGIN_Y <= inner.height;
+                let heights: Vec<u16> = side
+                    .iter()
+                    .map(|&i| {
+                        let kind = room.tiles[i].kind;
+                        if fits { natural_height(kind) } else { min_height(kind, Variant::Boxed) }
+                    })
+                    .collect();
+                let total: u16 = heights.iter().sum();
+                let x = inner.right().saturating_sub(side_w + FLOAT_MARGIN_X);
+                let mut y = inner.y + inner.height.saturating_sub(total) / 2;
+                for (&i, &h) in side.iter().zip(&heights) {
                     out.push(PlacedTile {
                         room: room_idx,
                         tile: i,
-                        rect: Rect::new(inner.right() - side_w, y, side_w, h),
+                        rect: Rect::new(x, y, side_w, h),
                         variant: Variant::Boxed,
                     });
                     y += h;
@@ -474,8 +488,16 @@ mod tests {
         let others: Vec<_> = l.tiles.iter().filter(|t| t.variant == Variant::Boxed).collect();
         assert_eq!(others.len(), 2);
         assert_eq!(featured.rect.height, area.height - 2, "graph fills the room's height");
-        assert!(others.iter().all(|t| featured.rect.contains(t.rect.as_position())), "boxes float over the graph");
-        assert!(others.iter().all(|t| t.rect.right() == featured.rect.right() + 1), "at the top-right");
+        // Graph shows on every side of the floating boxes.
+        for t in &others {
+            assert!(t.rect.x > featured.rect.x, "graph to the left");
+            assert!(t.rect.right() < featured.rect.right(), "graph to the right");
+        }
+        let top = others.iter().map(|t| t.rect.y).min().unwrap();
+        let bottom = others.iter().map(|t| t.rect.bottom()).max().unwrap();
+        assert!(top > featured.rect.y && bottom < featured.rect.bottom(), "graph above and below");
+        let (above, below) = (top - featured.rect.y, featured.rect.bottom() - bottom);
+        assert!(above.abs_diff(below) <= 1, "vertically centred: {above} above, {below} below");
         // Natural height, not stretched to fill the room.
         assert_eq!(others[0].rect.height, natural_height(Plug));
         assert_eq!(others[1].rect.height, natural_height(TemperatureSensor));

@@ -1,8 +1,7 @@
-//! Small, hand-rolled animation helpers: easing, tweens, colour mixing and
-//! the event ticker. Everything is driven by wall-clock time, so frame rate
-//! only affects smoothness, never speed.
+//! Small, hand-rolled animation helpers: easing, tweens and colour mixing.
+//! Everything is driven by wall-clock time, so frame rate only affects
+//! smoothness, never speed.
 
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use ratatui::style::Color;
@@ -12,7 +11,6 @@ pub const FLASH: Duration = Duration::from_millis(1200);
 /// Delay between rooms sweeping in at startup, and each sweep's length.
 pub const SWEEP_STAGGER: Duration = Duration::from_millis(110);
 pub const SWEEP: Duration = Duration::from_millis(450);
-const TICKER_CAPACITY: usize = 30;
 
 /// 0..=1 progress of an animation that started at `start`.
 pub fn progress(start: Instant, len: Duration, now: Instant) -> f64 {
@@ -61,49 +59,6 @@ impl Tween {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tone {
-    Normal,
-    Glow,
-    Heat,
-    Good,
-    Bad,
-}
-
-#[derive(Debug, Clone)]
-pub struct TickerEvent {
-    pub at: Instant,
-    pub device: usize,
-    pub text: String,
-    pub tone: Tone,
-}
-
-/// Recent notable changes, newest first.
-#[derive(Debug, Default)]
-pub struct Ticker {
-    events: VecDeque<TickerEvent>,
-}
-
-impl Ticker {
-    pub fn push(&mut self, device: usize, text: String, tone: Tone) {
-        self.events.push_front(TickerEvent {
-            at: Instant::now(),
-            device,
-            text,
-            tone,
-        });
-        self.events.truncate(TICKER_CAPACITY);
-    }
-
-    pub fn events(&self) -> impl Iterator<Item = &TickerEvent> {
-        self.events.iter()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,16 +83,5 @@ mod tests {
         assert_eq!(mix(Color::Rgb(0, 0, 0), Color::Rgb(200, 100, 50), 0.5), Color::Rgb(100, 50, 25));
         assert_eq!(mix(Color::Red, Color::Blue, 0.4), Color::Red);
         assert_eq!(mix(Color::Red, Color::Blue, 0.6), Color::Blue);
-    }
-
-    #[test]
-    fn ticker_is_newest_first_and_bounded() {
-        let mut t = Ticker::default();
-        for i in 0..40 {
-            t.push(0, format!("e{i}"), Tone::Normal);
-        }
-        let texts: Vec<_> = t.events().map(|e| e.text.as_str()).collect();
-        assert_eq!(texts.len(), TICKER_CAPACITY);
-        assert_eq!(texts[0], "e39");
     }
 }

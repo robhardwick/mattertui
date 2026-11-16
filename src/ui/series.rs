@@ -18,16 +18,17 @@ pub fn sample(history: &History, now_min: i64, range_min: i64, n: usize, continu
     let mut i = 0;
     let mut current: Option<f64> = None;
     for col in 0..n {
-        // Column end time, rounded down to whole minutes.
-        let t = now_min - range_min + ((col as i64 + 1) * range_min) / n as i64;
-        while i < buckets.len() && buckets[i].minute <= t {
+        // Column end time, in fractional minutes so short spans across many
+        // columns still change smoothly from column to column.
+        let t = (now_min - range_min) as f64 + (col as f64 + 1.0) * range_min as f64 / n as f64;
+        while i < buckets.len() && buckets[i].minute as f64 <= t {
             current = Some(buckets[i].last);
             i += 1;
         }
         let v = match (current, buckets.get(i)) {
             (Some(v), Some(next)) if continuous && i > 0 => {
                 let prev = buckets[i - 1];
-                let f = (t - prev.minute) as f64 / (next.minute - prev.minute) as f64;
+                let f = (t - prev.minute as f64) / (next.minute - prev.minute) as f64;
                 Some(v + (next.last - v) * f)
             }
             _ => current,

@@ -14,10 +14,9 @@ use crate::ui::icons;
 
 const SUPERSCRIPT: [&str; 9] = ["¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"];
 
-/// The room's box colour.
+/// The room's box colour: its hue.
 pub fn accent(app: &App, room: usize) -> Color {
-    let cfg = &app.config.rooms[room];
-    app.theme.accent(cfg.accent.as_ref().map(|a| a.get_ref().as_str()), room)
+    app.theme.ink(super::room_hue(app, room))
 }
 
 pub fn render(app: &App, room: usize, area: Rect, buf: &mut Buffer) {
@@ -81,10 +80,7 @@ fn summary(app: &App, devices: &[usize]) -> Vec<Vec<Span<'static>>> {
             Span::styled(format!("{on}/{}", plugs.len()), t.bold(if on > 0 { super::glow(app) } else { t.dim() })),
         ]);
     }
-    let heating = devices.iter().any(|&i| {
-        let d = &app.devices[i];
-        current(d, Metric::Running).is_some_and(|r| r as u64 & 1 != 0) || current(d, Metric::HeatDemand).is_some_and(|p| p > 0.0)
-    });
+    let heating = devices.iter().any(|&i| super::is_heating(&app.devices[i]));
     if heating {
         items.push(vec![Span::styled(format!("{} heating", icons::get("heating", t.ascii)), Style::new().fg(super::flame(app)))]);
     }

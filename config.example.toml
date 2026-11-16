@@ -8,14 +8,17 @@
 temperature_unit = "celsius"   # celsius | fahrenheit
 motion = true                  # false = no ambient animation
 history_hours = 24             # in-memory graph window (1–168)
+colors = "auto"                # auto | truecolor | 256 | 16 (if detection is wrong)
 
 [log]
 panel = "hidden"               # hidden | open — toggle with `
 height = 8
 filter = "info,mdns_sd=warn"   # tracing EnvFilter syntax; RUST_LOG overrides
 
-# Each room is a box in a shade of teal (teal, aqua, deep, mint, steel, sea,
-# pale); set `accent` to pick one. Icons are plain symbols, never emoji:
+# Colours come from one palette anchored on orange: orange, teal, violet,
+# rose, gold, sky, sage. Rooms take them in turn and devices take the ones
+# after their room's; set `accent` on a room or device to pin one. Icons are
+# plain symbols, never emoji:
 #   lamp bulb plug fan tv thermostat thermometer humidity battery heating
 #   cool home sofa bed moon sun kitchen bath office desk garden tree teddy
 #   games books garage star heart snow

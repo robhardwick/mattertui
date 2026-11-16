@@ -34,6 +34,14 @@ pub fn fmt_temp_unit(unit: TemperatureUnit, celsius: f64) -> String {
     }
 }
 
+/// Whether a device is heating now: running state or demand says so, and
+/// it isn't switched off.
+pub fn is_heating(d: &DeviceState) -> bool {
+    let on = |m| current(d, m).is_some_and(|v| v != 0.0);
+    current(d, Metric::Mode) != Some(0.0)
+        && (current(d, Metric::Running).is_some_and(|r| r as u64 & 1 != 0) || on(Metric::HeatDemand))
+}
+
 pub fn current(d: &DeviceState, m: Metric) -> Option<f64> {
     d.current.get(&m).copied().flatten()
 }
@@ -103,15 +111,56 @@ pub fn continuous(metric: Metric) -> bool {
     !matches!(metric, Metric::On | Metric::Running | Metric::Mode | Metric::HeatSetpoint | Metric::CoolSetpoint)
 }
 
-/// The graph palette for a metric.
-pub fn palette(metric: Metric) -> crate::ui::theme::Palette {
-    use crate::ui::theme::{BATTERY, HEATING, HUMIDITY, POWER, TEMPERATURE};
-    match metric {
-        Metric::Humidity => HUMIDITY,
-        Metric::On => POWER,
-        Metric::Running | Metric::HeatDemand => HEATING,
-        Metric::Battery => BATTERY,
-        _ => TEMPERATURE,
+/// A room's hue: its configured `accent`, else the next in the cycle.
+pub fn room_hue(app: &App, room: usize) -> usize {
+    let cfg = &app.config.rooms[room];
+    app.theme.hue(cfg.accent.as_ref().map(|a| a.get_ref().as_str()), room)
+}
+
+/// A device's hue. A featured device shares its room's (its graph *is* the
+/// room); others take the hues after the room's, in order, so neighbouring
+/// graphs differ. A device's own `accent` wins.
+pub fn device_hue(app: &App, device: usize) -> usize {
+    let cfg = &app.config.devices[device];
+    let Some(room) = app.rooms.iter().position(|r| r.contains(&device)) else {
+        return 0;
+    };
+    let rh = room_hue(app, room);
+    if let Some(a) = &cfg.accent {
+        return app.theme.hue(Some(a.get_ref()), rh);
+    }
+    if cfg.featured {
+        return rh;
+    }
+    let k = app.rooms[room]
+        .iter()
+        .filter(|&&d| !app.config.devices[d].featured)
+        .position(|&d| d == device)
+        .unwrap_or(0);
+    (rh + 1 + k) % crate::ui::theme::HUES.len()
+}
+
+/// Shortest span a graph is stretched over, so a few readings aren't
+/// smeared across the whole width.
+const MIN_SPAN_MINUTES: i64 = 5;
+
+/// Minutes a graph of `h` covers: the selected range, or less while history
+/// is shorter, so the data starts at the left edge and grows rightwards
+/// until it fills the range, then scrolls.
+pub fn span(app: &App, h: &History) -> i64 {
+    let now = crate::state::unix_minute();
+    let have = h.buckets().next().map_or(0, |b| now - b.minute);
+    have.clamp(MIN_SPAN_MINUTES, app.range_minutes().max(MIN_SPAN_MINUTES))
+}
+
+/// "12m", "1h", "1h30m", "2d".
+pub fn fmt_span(minutes: i64) -> String {
+    match minutes {
+        ..60 => format!("{minutes}m"),
+        _ if minutes % 1440 == 0 => format!("{}d", minutes / 1440),
+        _ if minutes % 60 == 0 => format!("{}h", minutes / 60),
+        _ if minutes < 1440 => format!("{}h{:02}m", minutes / 60, minutes % 60),
+        _ => format!("{}d{}h", minutes / 1440, (minutes % 1440) / 60),
     }
 }
 
@@ -121,12 +170,13 @@ fn graph_samples(app: &App, device: usize, metric: Metric, overlay: Option<Metri
     let h = d.history.get(&metric)?;
     let now = crate::state::unix_minute();
     let n = Graph::samples_for(width, app.theme.ascii);
-    let samples = series::sample(h, now, app.range_minutes(), n, continuous(metric));
+    let span = span(app, h);
+    let samples = series::sample(h, now, span, n, continuous(metric));
     // Setpoints change in steps, so they're never interpolated.
     let over = overlay
         .filter(|_| d.current.get(&Metric::Mode).copied().flatten() != Some(0.0))
         .and_then(|m| d.history.get(&m))
-        .map(|h| series::sample(h, now, app.range_minutes(), n, false))
+        .map(|h| series::sample(h, now, span, n, false))
         .unwrap_or_default();
     Some((samples, over))
 }
@@ -162,14 +212,14 @@ pub fn metric_graph_bare(app: &App, device: usize, metric: Metric, overlay: Opti
     let Some((lo, hi)) = metric_range(app, device, metric, overlay, area.width) else {
         return false;
     };
-    let p = palette(metric);
-    let colour = |frac: f64| t.graph(p, frac);
+    let h = device_hue(app, device);
+    let colour = |frac: f64| t.graph(h, frac);
     Graph {
         samples: &samples,
         lo,
         hi,
         colour: &colour,
-        overlay: (!over.is_empty()).then_some((over.as_slice(), t.heat())),
+        overlay: (!over.is_empty()).then_some((over.as_slice(), t.overlay())),
         ascii: t.ascii,
     }
     .render(area, buf);
@@ -296,5 +346,42 @@ pub fn ago(t: std::time::Instant) -> String {
         0..60 => format!("{s}s"),
         60..3600 => format!("{}m", s / 60),
         _ => format!("{}h", s / 3600),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::unix_minute;
+
+    #[test]
+    fn graphs_fit_short_history_then_scroll() {
+        let mut app = crate::ui::tests_support::fake_app(); // range 1h
+        let now = unix_minute();
+        let mut h = History::new(24 * 60);
+        h.record(now - 11, 20.0);
+        assert_eq!(span(&app, &h), 11, "11 minutes of data fill the width");
+        h.record(now, 21.0);
+        let mut short = History::new(24 * 60);
+        short.record(now, 1.0);
+        assert_eq!(span(&app, &short), MIN_SPAN_MINUTES, "never narrower than the floor");
+        let mut long = History::new(24 * 60);
+        long.record(now - 600, 1.0);
+        assert_eq!(span(&app, &long), 60, "capped at the selected range");
+        app.view = crate::ui::app::View::Dashboard;
+        // The leftmost column has data, and short history still ramps
+        // smoothly rather than in whole-minute steps.
+        let samples = series::sample(&h, now, span(&app, &h), 40, true);
+        assert!(samples[0].is_some(), "{samples:?}");
+        let distinct: std::collections::BTreeSet<_> = samples.iter().flatten().map(|v| (v * 1000.0) as i64).collect();
+        assert!(distinct.len() > 30, "{} distinct of 40", distinct.len());
+    }
+
+    #[test]
+    fn spans_format_compactly() {
+        assert_eq!(fmt_span(12), "12m");
+        assert_eq!(fmt_span(60), "1h");
+        assert_eq!(fmt_span(90), "1h30m");
+        assert_eq!(fmt_span(1440), "1d");
     }
 }

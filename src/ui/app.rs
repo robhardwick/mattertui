@@ -8,11 +8,11 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 
 use super::layout::{self, Layout, RoomSpec, TileSpec};
-use super::motion::{self, Ticker, Tone, Tween};
+use super::motion::{self, Tween};
 use super::theme::Theme;
+use crate::config::DeviceKind;
 use crate::config::{Config, LogPanel};
 use crate::logbuf::LogBuffer;
-use crate::config::DeviceKind;
 use crate::state::{AppEvent, DeviceState, DeviceUpdate, Metric, Status};
 
 /// Chart/sparkline ranges in minutes.
@@ -65,10 +65,7 @@ pub struct App {
     tweens: HashMap<(usize, Metric), Tween>,
     /// Last time each device reported, for the update flash.
     flashes: HashMap<usize, Instant>,
-    pub ticker: Ticker,
-    /// The ticker overflowed its line last frame and is scrolling.
-    pub ticker_scrolling: bool,
-    /// Last temperature announced in the ticker, per device.
+    /// Last temperature announced in the log, per device.
     announced: HashMap<usize, f64>,
     /// Devices that went offline after being live (for "back online").
     lost: std::collections::HashSet<usize>,
@@ -94,9 +91,16 @@ pub enum ModalKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Phase {
     /// Typing a code / confirming. `error` is from the last attempt.
-    Input { error: Option<String> },
-    Working { since: Instant },
-    Done { ok: bool, message: String },
+    Input {
+        error: Option<String>,
+    },
+    Working {
+        since: Instant,
+    },
+    Done {
+        ok: bool,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,8 +158,6 @@ impl App {
             epoch: Instant::now(),
             tweens: HashMap::new(),
             flashes: HashMap::new(),
-            ticker: Ticker::default(),
-            ticker_scrolling: false,
             announced: HashMap::new(),
             lost: Default::default(),
             history: None,
@@ -237,12 +239,13 @@ impl App {
                 }
             }
             AppEvent::Paired { id, result } => {
-                let Some(i) = self.device_index(&id) else { return };
+                let Some(i) = self.device_index(&id) else {
+                    return;
+                };
                 let (ok, message) = match result {
                     Ok(node_id) => {
                         self.devices[i].apply(DeviceUpdate::Status(Status::Connecting));
-                        let name = self.config.devices[i].name.clone();
-                        self.ticker.push(i, format!("{name} paired"), Tone::Good);
+                        self.event(i, "paired".into());
                         self.flashes.insert(i, Instant::now());
                         (true, format!("Paired as node 0x{node_id:X}. Connecting…"))
                     }
@@ -251,7 +254,9 @@ impl App {
                 self.finish_modal(i, ModalKind::Pair, ok, message);
             }
             AppEvent::Unpaired { id, result } => {
-                let Some(i) = self.device_index(&id) else { return };
+                let Some(i) = self.device_index(&id) else {
+                    return;
+                };
                 let (ok, message) = match result {
                     Ok(note) => {
                         self.devices[i] = DeviceState::new(self.config.ui.history_hours);
@@ -270,7 +275,9 @@ impl App {
             match store.load(d.id.get_ref()) {
                 Ok(saved) if !saved.is_empty() => self.devices[i].restore(saved),
                 Ok(_) => {}
-                Err(e) => tracing::warn!(device = d.id.get_ref().as_str(), error = %e, "couldn't load history"),
+                Err(e) => {
+                    tracing::warn!(device = d.id.get_ref().as_str(), error = %e, "couldn't load history")
+                }
             }
         }
         self.history = Some(store);
@@ -289,7 +296,10 @@ impl App {
     }
 
     fn device_index(&self, id: &str) -> Option<usize> {
-        self.config.devices.iter().position(|d| d.id.get_ref() == id)
+        self.config
+            .devices
+            .iter()
+            .position(|d| d.id.get_ref() == id)
     }
 
     fn finish_modal(&mut self, device: usize, kind: ModalKind, ok: bool, message: String) {
@@ -300,7 +310,9 @@ impl App {
                 } else {
                     // Let the user fix the code and retry without retyping.
                     m.phase = if kind == ModalKind::Pair {
-                        Phase::Input { error: Some(message) }
+                        Phase::Input {
+                            error: Some(message),
+                        }
                     } else {
                         Phase::Done { ok, message }
                     };
@@ -313,17 +325,27 @@ impl App {
 
     /// Something is moving on screen (needs fast redraws).
     pub fn animating(&self) -> bool {
-        if matches!(self.modal, Some(Modal { phase: Phase::Working { .. }, .. })) {
+        if matches!(
+            self.modal,
+            Some(Modal {
+                phase: Phase::Working { .. },
+                ..
+            })
+        ) {
             return true;
         }
         if !self.motion {
             return false;
         }
         let now = Instant::now();
-        let sweep_end = self.epoch + motion::SWEEP_STAGGER * self.rooms.len() as u32 + motion::SWEEP;
+        let sweep_end =
+            self.epoch + motion::SWEEP_STAGGER * self.rooms.len() as u32 + motion::SWEEP;
         now < sweep_end
             || self.tweens.values().any(|t| !t.done(now))
-            || self.flashes.values().any(|&f| now.saturating_duration_since(f) < motion::FLASH)
+            || self
+                .flashes
+                .values()
+                .any(|&f| now.saturating_duration_since(f) < motion::FLASH)
             || self.devices.iter().any(|d| d.status == Status::Connecting)
     }
 
@@ -332,7 +354,13 @@ impl App {
     pub fn ambient(&self) -> bool {
         self.motion
             && self.config.devices.iter().zip(&self.devices).any(|(c, d)| {
-                let on = |m| d.current.get(&m).copied().flatten().is_some_and(|v| v != 0.0);
+                let on = |m| {
+                    d.current
+                        .get(&m)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|v| v != 0.0)
+                };
                 (c.kind == DeviceKind::Plug && on(Metric::On)) || on(Metric::Running)
             })
     }
@@ -363,10 +391,15 @@ impl App {
         motion::ease_out_cubic(motion::progress(start, motion::SWEEP, Instant::now()))
     }
 
-    /// Start tweens/flashes and record ticker events for an incoming update.
+    /// Log a notable change for device `i`.
+    fn event(&self, i: usize, message: String) {
+        self.logs
+            .event(self.config.devices[i].id.get_ref(), message);
+    }
+
+    /// Start tweens/flashes and log notable changes for an incoming update.
     fn note_update(&mut self, i: usize, update: &DeviceUpdate) {
         let now = Instant::now();
-        let name = self.config.devices[i].name.clone();
         let d = &self.devices[i];
         match update {
             DeviceUpdate::Reading { metric, value } => {
@@ -377,24 +410,34 @@ impl App {
                 {
                     // Tween from wherever the display currently is.
                     let from = self.shown(i, *metric).unwrap_or(old);
-                    self.tweens.insert((i, *metric), Tween { from, to: *new, start: now });
+                    self.tweens.insert(
+                        (i, *metric),
+                        Tween {
+                            from,
+                            to: *new,
+                            start: now,
+                        },
+                    );
                 }
                 match (metric, value, old) {
                     (Metric::On, Some(v), Some(o)) if (v != &0.0) != (o != 0.0) => {
                         let on = *v != 0.0;
-                        self.ticker.push(i, format!("{name} {}", if on { "on" } else { "off" }), if on { Tone::Glow } else { Tone::Normal });
+                        self.event(i, (if on { "on" } else { "off" }).to_string());
                     }
                     (Metric::HeatSetpoint, Some(v), Some(o)) if (v - o).abs() >= 0.05 => {
-                        let text = format!("{name} set to {}", super::widgets::fmt_temp_unit(self.config.ui.temperature_unit, *v));
-                        self.ticker.push(i, text, Tone::Heat);
+                        let text = format!(
+                            "set to {}",
+                            super::widgets::fmt_temp_unit(self.config.ui.temperature_unit, *v)
+                        );
+                        self.event(i, text);
                     }
                     (Metric::Mode, Some(v), Some(o)) if v != &o => {
                         let mode = super::widgets::tile::system_mode(*v as u8);
-                        self.ticker.push(i, format!("{name} → {mode}"), if *v == 0.0 { Tone::Normal } else { Tone::Heat });
+                        self.event(i, format!("mode → {mode}"));
                     }
                     (Metric::Running, Some(v), Some(o)) if (*v as u64 & 1) != (o as u64 & 1) => {
                         let heating = *v as u64 & 1 != 0;
-                        self.ticker.push(i, format!("{name} heating {}", if heating { "on" } else { "off" }), if heating { Tone::Heat } else { Tone::Normal });
+                        self.event(i, format!("heating {}", if heating { "on" } else { "off" }));
                     }
                     (Metric::Temperature, Some(v), _) => {
                         // Announce moves of half a degree or more, not every wobble.
@@ -404,8 +447,14 @@ impl App {
                             }
                             Some(last) if (v - last).abs() >= 0.5 => {
                                 let arrow = if *v > last { "↑" } else { "↓" };
-                                let text = format!("{name} {} {arrow}", super::widgets::fmt_temp_unit(self.config.ui.temperature_unit, *v));
-                                self.ticker.push(i, text, Tone::Normal);
+                                let text = format!(
+                                    "{} {arrow}",
+                                    super::widgets::fmt_temp_unit(
+                                        self.config.ui.temperature_unit,
+                                        *v
+                                    )
+                                );
+                                self.event(i, text);
                                 self.announced.insert(i, *v);
                             }
                             Some(_) => {}
@@ -416,11 +465,11 @@ impl App {
             }
             DeviceUpdate::Status(new) => match (&d.status, new) {
                 (Status::Live { .. } | Status::Reconnecting { .. }, Status::Offline { .. }) => {
-                    self.ticker.push(i, format!("{name} offline"), Tone::Bad);
+                    self.event(i, "offline".into());
                     self.lost.insert(i);
                 }
                 (_, Status::Live { .. }) if self.lost.remove(&i) => {
-                    self.ticker.push(i, format!("{name} back online"), Tone::Good);
+                    self.event(i, "back online".into());
                 }
                 _ => {}
             },
@@ -428,7 +477,8 @@ impl App {
         }
         // Drop finished animations so `animating()` goes quiet.
         self.tweens.retain(|_, t| !t.done(now));
-        self.flashes.retain(|_, &mut at| now.saturating_duration_since(at) < motion::FLASH);
+        self.flashes
+            .retain(|_, &mut at| now.saturating_duration_since(at) < motion::FLASH);
     }
 
     fn open_modal(&mut self, kind: ModalKind) {
@@ -450,7 +500,12 @@ impl App {
             },
             _ => Phase::Input { error: None },
         };
-        self.modal = Some(Modal { kind, device, input: String::new(), phase });
+        self.modal = Some(Modal {
+            kind,
+            device,
+            input: String::new(),
+            phase,
+        });
     }
 
     fn on_modal_key(&mut self, key: KeyEvent) {
@@ -465,7 +520,9 @@ impl App {
             }
             (Phase::Input { .. }, KeyCode::Char(c)) if m.kind == ModalKind::Pair => {
                 // Digits, separators, and the QR alphabet (base38: A-Z 0-9 - .) plus "MT:".
-                if (c.is_ascii_alphanumeric() || matches!(c, '-' | ' ' | '.' | ':')) && m.input.len() < 40 {
+                if (c.is_ascii_alphanumeric() || matches!(c, '-' | ' ' | '.' | ':'))
+                    && m.input.len() < 40
+                {
                     m.input.push(c.to_ascii_uppercase());
                     m.phase = Phase::Input { error: None };
                 }
@@ -473,17 +530,30 @@ impl App {
             (Phase::Input { .. }, KeyCode::Enter) if m.kind == ModalKind::Pair => {
                 match crate::matter::pairing::normalize_code(&m.input) {
                     Ok(code) => {
-                        self.action = Some(Action::Pair { device: m.device, code });
-                        m.phase = Phase::Working { since: Instant::now() };
+                        self.action = Some(Action::Pair {
+                            device: m.device,
+                            code,
+                        });
+                        m.phase = Phase::Working {
+                            since: Instant::now(),
+                        };
                     }
-                    Err(e) => m.phase = Phase::Input { error: Some(e.to_string()) },
+                    Err(e) => {
+                        m.phase = Phase::Input {
+                            error: Some(e.to_string()),
+                        }
+                    }
                 }
             }
             (Phase::Input { .. }, KeyCode::Char('y' | 'Y')) if m.kind == ModalKind::Unpair => {
                 self.action = Some(Action::Unpair { device: m.device });
-                m.phase = Phase::Working { since: Instant::now() };
+                m.phase = Phase::Working {
+                    since: Instant::now(),
+                };
             }
-            (Phase::Input { .. }, KeyCode::Char('n' | 'N')) if m.kind == ModalKind::Unpair => self.modal = None,
+            (Phase::Input { .. }, KeyCode::Char('n' | 'N')) if m.kind == ModalKind::Unpair => {
+                self.modal = None
+            }
             _ => {}
         }
     }
@@ -561,7 +631,9 @@ impl App {
         let total = self.logs.snapshot().len();
         match code {
             KeyCode::Up | KeyCode::Char('k') => self.log_scroll += 1,
-            KeyCode::Down | KeyCode::Char('j') => self.log_scroll = self.log_scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.log_scroll = self.log_scroll.saturating_sub(1)
+            }
             KeyCode::PageUp => self.log_scroll += 10,
             KeyCode::PageDown => self.log_scroll = self.log_scroll.saturating_sub(10),
             KeyCode::End => self.log_scroll = 0,
@@ -622,7 +694,9 @@ impl App {
             Status::Connecting => Health::Connecting,
             // Resubscribes are routine (sleepy devices, Wi-Fi blips) and the
             // last values are still good, so only escalate if it drags on.
-            Status::Reconnecting { .. } if d.status_since.elapsed() < RECONNECT_GRACE => Health::Reconnecting,
+            Status::Reconnecting { .. } if d.status_since.elapsed() < RECONNECT_GRACE => {
+                Health::Reconnecting
+            }
             Status::Reconnecting { .. } => Health::Stale,
             Status::Offline { .. } => Health::Offline,
             Status::Live { max_interval_s } => {
@@ -684,8 +758,5 @@ fn centre(r: Rect) -> (i32, i32) {
 
 fn max_range_index(history_hours: u32) -> usize {
     let max_min = i64::from(history_hours) * 60;
-    RANGES
-        .iter()
-        .rposition(|(m, _)| *m <= max_min)
-        .unwrap_or(0)
+    RANGES.iter().rposition(|(m, _)| *m <= max_min).unwrap_or(0)
 }
