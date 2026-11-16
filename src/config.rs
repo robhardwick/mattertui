@@ -77,6 +77,8 @@ pub enum LogPanel {
 pub struct Room {
     pub id: Spanned<String>,
     pub name: String,
+    /// Ignored: kept so configs from before icons were dropped still load.
+    #[allow(dead_code)]
     pub icon: Option<Spanned<String>>,
     pub accent: Option<Spanned<String>>,
 }
@@ -89,6 +91,8 @@ pub struct Device {
     pub name: String,
     pub room: Spanned<String>,
     pub kind: DeviceKind,
+    /// Ignored: kept so configs from before icons were dropped still load.
+    #[allow(dead_code)]
     pub icon: Option<Spanned<String>>,
     #[serde(default)]
     pub featured: bool,
@@ -141,9 +145,6 @@ impl Config {
             if !room_ids.insert(room.id.get_ref().as_str()) {
                 err(room.id.span(), format!("duplicate room id `{}`", room.id.get_ref()));
             }
-            if let Some(icon) = &room.icon {
-                check_icon(icon, &mut err);
-            }
             if let Some(accent) = &room.accent
                 && !crate::ui::theme::accent_names().any(|a| a == accent.get_ref())
             {
@@ -172,9 +173,6 @@ impl Config {
                     format!("unknown room `{}` (declare it with [[room]])", dev.room.get_ref()),
                 );
             }
-            if let Some(icon) = &dev.icon {
-                check_icon(icon, &mut err);
-            }
         }
 
         if errors.is_empty() {
@@ -184,21 +182,13 @@ impl Config {
         }
     }
 
+    /// How many rooms and devices still set the ignored `icon` key.
+    pub fn ignored_icons(&self) -> usize {
+        self.rooms.iter().filter(|r| r.icon.is_some()).count() + self.devices.iter().filter(|d| d.icon.is_some()).count()
+    }
+
     pub fn device(&self, id: &str) -> Option<&Device> {
         self.devices.iter().find(|d| d.id.get_ref() == id)
-    }
-}
-
-fn check_icon(icon: &Spanned<String>, err: &mut impl FnMut(std::ops::Range<usize>, String)) {
-    if !crate::ui::icons::is_valid(icon.get_ref()) {
-        err(
-            icon.span(),
-            format!(
-                "unknown icon `{}`: use a single symbol like \"★\", or one of: {}",
-                icon.get_ref(),
-                crate::ui::icons::names().collect::<Vec<_>>().join(", ")
-            ),
-        );
     }
 }
 

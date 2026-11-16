@@ -444,6 +444,8 @@ The app code is identical on both platforms. Only OS-level network setup differs
    estimated because the device doesn't report it.
 7. **Visual refresh** (done, §12): btop-inspired graphs, panels that fill
    the screen, one orange + teal palette, tighter alignment.
+8. **btop fidelity** (done, §13): look like btop's default theme, following
+   the reference screenshot.
 
 ---
 
@@ -657,3 +659,57 @@ way btop does. Four strands:
 - Keep the terminal background (black).
 - Keep the emoji for now; revisit after the refresh.
 - Subtle teal-family tint per room.
+
+---
+
+## 13. Milestone 8: btop fidelity
+
+**Result (2026-11-16):** built as specified below.
+- Square boxes with `┐¹title┌` titles.
+- A box per device, dimmer than its room's box.
+- `Label: ── value` rows, `■` meters, and braille everywhere: device
+  graphs, mini graphs in row mode, and the detail view's on/off and heating
+  history.
+- Featured rooms in btop's CPU-box style, with double-width columns so the
+  graph has room.
+- The log is in a box, and the events ticker runs along the bottom rule.
+- No emoji and no big text.
+- Ordinary ticker events take their room's colour.
+
+Milestone 7 was "inspired by" btop. This one matches the reference screenshot
+of btop's default theme.
+
+**Decisions (2026-11-16):**
+- **No emoji, and no big text.** The `icon` config key is accepted but
+  ignored; `check` says it can be removed.
+- **Everything has a panel.**
+  - Every device is its own box inside its room's box.
+  - The log panel is a box.
+  - The top and bottom bars are rules with bracketed titles.
+- **Braille for every graph and chart,** including one-row mini graphs next
+  to values (like btop's per-core rows).
+- **Featured devices, laid out like btop's CPU box:**
+  - The featured device's graph fills the room.
+  - The room's other devices stack as boxes in a column on the right, like
+    btop's per-core panel.
+  - In a narrow room, it falls back to plain boxes.
+
+**Visual language, taken from the screenshot:**
+- **Boxes:**
+  - square corners (`┌┐└┘`);
+  - titles cut into the border as `┐¹name┌`, with the number in the
+    highlight colour;
+  - one distinct colour per room box, cycling green, orange, magenta, red,
+    blue, cyan, olive;
+  - device boxes are a dimmer shade of their room's colour.
+- **Rows:** bold white labels, a `─` leader in dark grey, then the value
+  right-aligned. Values are coloured by what they mean.
+- **Meters:** `■` cells on a grey `■` track, filled with a green → yellow
+  → red gradient (or a blue scale for humidity).
+- **Graphs:** braille, coloured by height (green → yellow → red), with
+  temperature coloured by absolute value.
+- **Selection:** the selected device's box gets a bright border, and its
+  title is shown in reverse (btop's selected-row colours).
+- **Compact mode** (when space is tight): devices become one-line rows
+  inside the room box, like btop's core list. Each row is a label, a mini
+  braille graph, and a value.

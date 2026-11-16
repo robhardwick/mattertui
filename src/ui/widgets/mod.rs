@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::layout::Alignment;
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use super::app::{App, Health};
@@ -115,7 +115,7 @@ fn graph_samples(app: &App, device: usize, metric: Metric, overlay: Option<Metri
 /// The value range a graph of `metric` uses at this width.
 pub fn metric_range(app: &App, device: usize, metric: Metric, overlay: Option<Metric>, width: u16) -> Option<(f64, f64)> {
     let (samples, over) = graph_samples(app, device, metric, overlay, width)?;
-    if metric == Metric::On {
+    if matches!(metric, Metric::On | Metric::Running) {
         // Fixed scale so "on" always reaches the top.
         return samples.iter().any(Option::is_some).then_some((0.0, 1.0));
     }
@@ -148,6 +148,7 @@ pub fn metric_graph_bare(app: &App, device: usize, metric: Metric, overlay: Opti
         Metric::Temperature => t.temperature(v),
         Metric::Humidity => t.humidity(v),
         Metric::On => glow,
+        Metric::Running => t.heat(),
         _ => t.graph((v - lo) / (hi - lo)),
     };
     Graph {
@@ -167,8 +168,10 @@ pub fn metric_graph(app: &App, device: usize, metric: Metric, overlay: Option<Me
     if !metric_graph_bare(app, device, metric, overlay, area, buf) {
         return;
     }
+    // Scale labels; on/off graphs speak for themselves.
     if area.height >= 3
         && area.width >= 20
+        && !matches!(metric, Metric::On | Metric::Running)
         && let Some((lo, hi)) = metric_range(app, device, metric, overlay, area.width)
     {
         let fmt = |v: f64| match metric {
@@ -183,22 +186,95 @@ pub fn metric_graph(app: &App, device: usize, metric: Metric, overlay: Option<Me
     }
 }
 
-/// A one-row on/off timeline (plugs, heating) over the selected range.
-pub fn timeline(app: &App, h: Option<&History>, area: Rect, buf: &mut Buffer, on: Color) {
-    let Some(h) = h else { return };
-    let now = crate::state::unix_minute();
-    let values = series::sample(h, now, app.range_minutes(), area.width as usize);
-    let (on_g, off_g) = if app.theme.ascii { ('=', '-') } else { ('━', '─') };
-    for (i, v) in values.iter().enumerate() {
-        let (g, c) = match v {
-            Some(v) if *v != 0.0 => (on_g, on),
-            Some(_) => (off_g, app.theme.faint()),
-            None => continue,
-        };
-        buf[(area.x + i as u16, area.y)]
-            .set_char(g)
-            .set_style(Style::new().fg(c));
+/// A btop box: square corners and titles cut into the border as
+/// `┌─┐title┌───┐status┌─┐`. Returns the inner area.
+pub fn btop_box(
+    app: &App,
+    area: Rect,
+    buf: &mut Buffer,
+    colour: Color,
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+) -> Rect {
+    use ratatui::widgets::{Block, BorderType};
+    let edge = Style::new().fg(colour);
+    let wrap = |spans: Vec<Span<'static>>| {
+        let mut v = vec![Span::styled("─┐", edge)];
+        v.extend(spans);
+        v.push(Span::styled("┌", edge));
+        Line::from(v)
+    };
+    let mut block = Block::bordered()
+        .border_type(BorderType::Plain)
+        .border_style(edge);
+    let inner = block.inner(area);
+    let has_text = |spans: &[Span]| spans.iter().any(|s| !s.content.trim().is_empty());
+    let left = has_text(&left).then(|| wrap(left));
+    let right = has_text(&right).then(|| {
+        let mut l = wrap(right);
+        l.spans.push(Span::styled("─", edge));
+        l
+    });
+    // Titles only if they fit together; the left one wins.
+    let lw = left.as_ref().map_or(0, |l| l.width() as u16);
+    let rw = right.as_ref().map_or(0, |l| l.width() as u16);
+    if let Some(l) = left {
+        block = block.title(l);
     }
+    if let Some(r) = right
+        && lw + rw + 3 <= area.width
+    {
+        block = block.title(r.alignment(Alignment::Right));
+    }
+    let _ = app;
+    block.render(area, buf);
+    inner
+}
+
+/// A btop row: bold label, a dark `─` leader, and the value right-aligned.
+pub fn label_row(app: &App, area: Rect, buf: &mut Buffer, label: &str, value: Line<'static>) {
+    let t = &app.theme;
+    if area.is_empty() {
+        return;
+    }
+    for x in area.left()..area.right() {
+        buf[(x, area.y)].set_char('─').set_style(Style::new().fg(t.faint()));
+    }
+    let label = Line::from(vec![Span::styled(format!("{label}:"), t.bold(t.title())), Span::raw(" ")]);
+    let lw = label.width() as u16;
+    label.render(area, buf);
+    let mut value = value;
+    value.spans.insert(0, Span::raw(" "));
+    if (value.width() as u16) + lw <= area.width {
+        value.alignment(Alignment::Right).render(area, buf);
+    }
+}
+
+/// A btop row with a meter between the label and the value:
+/// `Humidity: ■■■■■■■■■■■■····· 54%`. Returns the meter's area.
+pub fn meter_row(
+    app: &App,
+    area: Rect,
+    buf: &mut Buffer,
+    label: &str,
+    frac: f64,
+    colour: &dyn Fn(f64) -> Color,
+    value: Line<'static>,
+) -> Rect {
+    let t = &app.theme;
+    if area.is_empty() {
+        return Rect::default();
+    }
+    let label = Line::from(vec![Span::styled(format!("{label}:"), t.bold(t.title())), Span::raw(" ")]);
+    let lw = label.width() as u16;
+    label.render(area, buf);
+    let mut value = value;
+    value.spans.insert(0, Span::raw(" "));
+    let vw = value.width() as u16;
+    value.alignment(Alignment::Right).render(area, buf);
+    let meter = Rect::new(area.x + lw, area.y, area.width.saturating_sub(lw + vw), 1);
+    graph::meter(meter, buf, frac, colour, t.faint(), t.ascii);
+    meter
 }
 
 /// "12s", "4m", "2h" since an instant.

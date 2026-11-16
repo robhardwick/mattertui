@@ -2,7 +2,6 @@
 
 pub mod app;
 pub mod graph;
-pub mod icons;
 pub mod layout;
 pub mod motion;
 pub mod series;
@@ -222,7 +221,7 @@ async fn event_loop(
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let log_height = if app.log_open {
-        app.config.log.height.saturating_add(1).min(area.height / 2)
+        app.config.log.height.saturating_add(2).min(area.height / 2)
     } else {
         0
     };
@@ -435,17 +434,21 @@ icon = "plug"
     /// Strip the volatile clock so snapshots are stable.
     pub fn stable(s: String) -> String {
         let mut lines: Vec<String> = s.lines().map(str::to_string).collect();
-        // The top bar shows the clock as "┤ HH:MM ├".
+        // The top bar shows the clock as "┐HH:MM:SS┌".
         if let Some(top) = lines.first_mut() {
             let mut out = String::new();
             let mut rest = top.as_str();
-            while let Some(p) = rest.find("┤ ") {
-                out.push_str(&rest[..p + "┤ ".len()]);
-                rest = &rest[p + "┤ ".len()..];
+            while let Some(p) = rest.find('┐') {
+                out.push_str(&rest[..p + '┐'.len_utf8()]);
+                rest = &rest[p + '┐'.len_utf8()..];
                 let b = rest.as_bytes();
-                if b.len() >= 5 && b[2] == b':' && b[..2].iter().chain(&b[3..5]).all(u8::is_ascii_digit) {
-                    out.push_str("HH:MM");
-                    rest = &rest[5..];
+                let is_clock = b.len() >= 8
+                    && b[2] == b':'
+                    && b[5] == b':'
+                    && [0, 1, 3, 4, 6, 7].iter().all(|&i| b[i].is_ascii_digit());
+                if is_clock {
+                    out.push_str("HH:MM:SS");
+                    rest = &rest[8..];
                 }
             }
             out.push_str(rest);
@@ -691,8 +694,8 @@ mod thermostat_tests {
     #[test]
     fn thermostat_tiles() {
         let mut app = fake_app();
-        // Featured (with gauge), wide enough to show it.
-        insta::assert_snapshot!("featured", stable(render(&mut app, 130, 34)).lines().take(20).collect::<Vec<_>>().join("\n"));
+        // Wide enough for the featured layout (graph + side column).
+        insta::assert_snapshot!("featured", stable(render(&mut app, 200, 40)));
         app.config.devices[1].featured = false;
         insta::assert_snapshot!("normal", stable(render(&mut app, 130, 34)).lines().take(14).collect::<Vec<_>>().join("\n"));
     }

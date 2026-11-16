@@ -3,13 +3,6 @@
 # Rooms and devices appear in the order they are declared; the dashboard
 # lays them out automatically. Pair a device with:
 #   mattertui pair <device-id> <setup-code>
-#
-# Icons (for rooms and devices), shown as emoji:
-#   lamp bulb plug fan tv thermostat thermometer humidity battery fire cool
-#   home sofa bed moon sun kitchen bath office desk garden tree teddy games
-#   books garage star heart snow
-# Or give a single emoji directly, e.g. icon = "🎸". Prefer emoji that show
-# as emoji by default; ones like ☀ or ❄ can misalign in tmux.
 
 [ui]
 temperature_unit = "celsius"   # celsius | fahrenheit
@@ -21,22 +14,21 @@ panel = "hidden"               # hidden | open — toggle with `
 height = 8
 filter = "info,mdns_sd=warn"   # tracing EnvFilter syntax; RUST_LOG overrides
 
+# Each room is a box. Colours cycle green, orange, magenta, red, blue,
+# cyan, olive; set `accent` to pick one.
 [[room]]
 id = "living-room"
 name = "Living room"
-icon = "sofa"
 
 [[room]]
 id = "bedroom"
 name = "Bedroom"
-icon = "bed"
 
 [[device]]
 id = "living-room-lamp"        # also the pairing label: a-z, 0-9, -
 name = "Lamp"
 room = "living-room"
 kind = "plug"                  # plug | thermostat | temperature_sensor
-icon = "lamp"
 
 [[device]]
 id = "bedroom-temp"
@@ -44,4 +36,6 @@ name = "Bedside"
 room = "bedroom"
 kind = "temperature_sensor"
 # endpoint = 1                 # optional; auto-detected
-# featured = true              # bigger tile with a chart
+# featured = true              # fills its room with a big graph; the room's
+                               # other devices stack beside it (like btop's
+                               # CPU box)

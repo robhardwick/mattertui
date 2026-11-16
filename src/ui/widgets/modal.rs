@@ -22,20 +22,28 @@ pub fn render(app: &App, m: &Modal, area: Rect, buf: &mut Buffer) {
     let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
     Clear.render(r, buf);
     let title = match m.kind {
-        ModalKind::Pair => format!(" Pair {name} "),
-        ModalKind::Unpair => format!(" Unpair {name} "),
+        ModalKind::Pair => format!("Pair {name}"),
+        ModalKind::Unpair => format!("Unpair {name}"),
     };
     let hint = match &m.phase {
-        Phase::Input { .. } if m.kind == ModalKind::Pair => " Enter pair · Esc cancel ",
-        Phase::Input { .. } => " y unpair · n cancel ",
-        Phase::Working { .. } => " Esc hide (keeps going) ",
-        Phase::Done { .. } => " Enter close ",
+        Phase::Input { .. } if m.kind == ModalKind::Pair => "Enter pair · Esc cancel",
+        Phase::Input { .. } => "y unpair · n cancel",
+        Phase::Working { .. } => "Esc hide (keeps going)",
+        Phase::Done { .. } => "Enter close",
     };
+    let edge = Style::new().fg(accent);
     let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(accent))
-        .title(Line::styled(title, t.bold(t.fg())))
-        .title_bottom(Line::styled(hint, Style::new().fg(t.faint())).alignment(Alignment::Right));
+        .border_type(BorderType::Plain)
+        .border_style(edge)
+        .title(Line::from(vec![
+            Span::styled("─┐", edge),
+            Span::styled(title, t.bold(t.title())),
+            Span::styled("┌", edge),
+        ]))
+        .title_bottom(
+            Line::from(vec![Span::styled("┘", edge), Span::styled(hint, t.muted()), Span::styled("└─", edge)])
+                .alignment(Alignment::Right),
+        );
     let inner = block.inner(r);
     block.render(r, buf);
     let inner = Rect::new(inner.x + 2, inner.y + 1, inner.width.saturating_sub(4), inner.height.saturating_sub(1));

@@ -1,16 +1,16 @@
-//! Full-screen view of one device: facts, health and a chart per metric.
+//! Full-screen view of one device, btop style: facts as label rows, then a
+//! box per metric with a braille graph, scale and time axis.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Widget};
+use ratatui::widgets::Widget;
 
 use super::tile::{system_mode, transport_name};
-use super::{ago, current, fmt_temp, health_badge, room, timeline};
+use super::{ago, btop_box, current, fmt_temp, health_badge, label_row, room};
 use crate::state::{Metric, Status, unix_minute};
-use crate::ui::app::App;
-use crate::ui::icons;
+use crate::ui::app::{App, Health};
 use crate::ui::series;
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
@@ -19,231 +19,222 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     let cfg = &app.config.devices[i];
     let d = &app.devices[i];
     let room_idx = app.rooms.iter().position(|r| r.contains(&i)).unwrap_or(0);
-    let accent = room::accent(app, room_idx);
+    let colour = room::accent(app, room_idx);
 
-    let bracket = |c: &'static str| Span::styled(c, Style::new().fg(accent));
-    let block = Block::bordered()
-        .border_type(if t.ascii { BorderType::Plain } else { BorderType::Rounded })
-        .border_style(Style::new().fg(accent))
-        .title(Line::from(vec![
-            bracket("┤"),
-            Span::raw(format!(
-                " {} ",
-                icons::glyph(cfg.icon.as_ref().map(|i| i.get_ref().as_str()), icons::default_for(cfg.kind), t.ascii)
-            )),
+    let outer = btop_box(
+        app,
+        area,
+        buf,
+        colour,
+        vec![
             Span::styled(cfg.name.clone(), t.bold(t.title())),
-            Span::styled(format!(" · {} ", app.config.rooms[room_idx].name), Style::new().fg(accent)),
-            bracket("├"),
-        ]))
-        .title_bottom(
-            Line::from(vec![
-                bracket("┤"),
-                Span::styled(" ←→", t.bold(t.orange())),
-                Span::styled(" device · ", t.muted()),
-                Span::styled("[ ]", t.bold(t.orange())),
-                Span::styled(" range · ", t.muted()),
-                Span::styled("Esc", t.bold(t.orange())),
-                Span::styled(" back ", t.muted()),
-                bracket("├"),
-            ])
-            .alignment(Alignment::Right),
-        );
-    let inner = block.inner(area);
-    block.render(area, buf);
-    let inner = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), inner.height);
+            Span::styled(format!(" {}", app.config.rooms[room_idx].name), t.muted()),
+        ],
+        vec![
+            Span::styled("←→", t.bold(t.hi())),
+            Span::styled(" device ", t.muted()),
+            Span::styled("[ ]", t.bold(t.hi())),
+            Span::styled(" range ", t.muted()),
+            Span::styled("Esc", t.bold(t.hi())),
+            Span::styled(" back", t.muted()),
+        ],
+    );
+    let inner = Rect::new(outer.x + 1, outer.y, outer.width.saturating_sub(2), outer.height);
+    let mut y = 0;
+    let mut row = |buf: &mut Buffer, label: &str, value: Line<'static>| {
+        if y < inner.height {
+            label_row(app, Rect::new(inner.x, inner.y + y, inner.width, 1), buf, label, value);
+            y += 1;
+        }
+    };
 
     // Facts.
-    let mut facts: Vec<Span> = Vec::new();
     if let Some(info) = &d.info {
-        facts.push(Span::styled(
-            format!("{} {}", info.vendor.as_deref().unwrap_or("?"), info.product.as_deref().unwrap_or("?")),
-            t.text(),
-        ));
-        let mut rest = vec![
-            info.firmware.as_ref().map(|f| format!("fw {f}")),
-            Some(transport_name(info.transport).to_string()).filter(|s| !s.is_empty()),
-            Some(format!("node 0x{:X}", info.node_id)),
-            Some(format!("endpoint {}", info.endpoint)),
-        ];
+        row(
+            buf,
+            "Device",
+            Line::from(vec![
+                Span::styled(
+                    format!("{} {}", info.vendor.as_deref().unwrap_or("?"), info.product.as_deref().unwrap_or("?")),
+                    t.bold(t.title()),
+                ),
+                Span::styled(info.firmware.as_ref().map(|f| format!("  fw {f}")).unwrap_or_default(), t.muted()),
+            ]),
+        );
+        row(
+            buf,
+            "Network",
+            Line::styled(
+                format!("{}  node 0x{:X}  endpoint {}", transport_name(info.transport), info.node_id, info.endpoint),
+                t.muted(),
+            ),
+        );
         if let Some(th) = info.thermostat {
-            rest.push(Some(
-                match (th.can_heat, th.can_cool) {
-                    (true, false) => "heating only",
-                    (false, true) => "cooling only",
-                    _ => "heating and cooling",
-                }
-                .to_string(),
-            ));
             let whole = |v: f64| fmt_temp(app, v).replace(".0°", "°");
-            rest.push(th.heat_limits.map(|(lo, hi)| format!("setpoint {}–{}", whole(lo), whole(hi))));
-        }
-        for s in rest.into_iter().flatten() {
-            facts.push(Span::styled(format!("  ·  {s}"), t.muted()));
+            let caps = match (th.can_heat, th.can_cool) {
+                (true, false) => "heating only",
+                (false, true) => "cooling only",
+                _ => "heating and cooling",
+            };
+            let limits = th.heat_limits.map(|(lo, hi)| format!("  setpoint {}–{}", whole(lo), whole(hi))).unwrap_or_default();
+            row(buf, "Control", Line::styled(format!("{caps}{limits}"), t.muted()));
         }
     } else {
-        facts.push(Span::styled(format!("id {}", cfg.id.get_ref()), t.muted()));
+        row(buf, "Device", Line::styled(cfg.id.get_ref().clone(), t.muted()));
     }
-    // Facts can be long (thermostats): wrap onto a second line.
-    ratatui::widgets::Paragraph::new(Line::from(facts))
-        .wrap(ratatui::widgets::Wrap { trim: true })
-        .render(Rect::new(inner.x, inner.y, inner.width, 2).intersection(inner), buf);
 
     // Health.
     let health = app.health(i);
-    let mut status = match health_badge(app, health) {
-        None => vec![Span::styled("● live", Style::new().fg(t.good()))],
-        Some((text, c)) => {
-            let text = if health == crate::ui::app::Health::Reconnecting { "reconnecting" } else { &text };
-            vec![Span::styled(format!("● {text}"), Style::new().fg(c))]
-        }
-    };
+    let mut status = vec![];
     match &d.status {
-        Status::Live { max_interval_s } => {
-            status.push(Span::styled(format!("  ·  reports at least every {max_interval_s}s"), t.muted()))
-        }
+        Status::Live { max_interval_s } => status.push(Span::styled(format!("reports every ≤{max_interval_s}s  "), t.muted())),
         Status::Offline { error } | Status::Reconnecting { cause: error } => {
-            status.push(Span::styled(format!("  ·  {error}"), t.muted()))
+            status.push(Span::styled(format!("{error}  "), t.muted()))
         }
-        Status::Unpaired => status.push(Span::styled(
-            format!("  ·  run `mattertui pair {} <code>`", cfg.id.get_ref()),
-            t.muted(),
-        )),
+        Status::Unpaired => status.push(Span::styled(format!("mattertui pair {} <code>  ", cfg.id.get_ref()), t.muted())),
         Status::Connecting => {}
     }
     if let Some(last) = d.last_report {
-        status.push(Span::styled(format!("  ·  last report {} ago", ago(last)), t.muted()));
+        status.push(Span::styled(format!("last {} ago  ", ago(last)), t.muted()));
     }
-    Line::from(status).render(row(inner, 2), buf);
+    status.push(match health_badge(app, health) {
+        None => Span::styled("live", t.bold(t.good())),
+        Some((text, c)) => {
+            let text = if health == Health::Reconnecting { "reconnecting".to_string() } else { text };
+            Span::styled(text, t.bold(c))
+        }
+    });
+    row(buf, "Status", Line::from(status));
 
     // Range tabs.
-    let mut tabs = vec![Span::styled("range ", t.muted())];
+    let mut tabs = vec![];
     for (label, active) in app.ranges() {
         tabs.push(if active {
-            Span::styled(format!(" {label} "), Style::new().fg(Color::Black).bg(t.orange()).add_modifier(Modifier::BOLD))
+            Span::styled(format!(" {label} "), Style::new().fg(t.title()).bg(t.selected_bg()).add_modifier(Modifier::BOLD))
         } else {
             Span::styled(format!(" {label} "), t.muted())
         });
     }
-    Line::from(tabs).render(row(inner, 4), buf);
+    row(buf, "Range", Line::from(tabs));
 
-    // One section per metric with history.
-    let body = Rect::new(inner.x, inner.y + 6, inner.width, inner.height.saturating_sub(6));
+    // A box per metric with history.
+    let body = Rect::new(outer.x, outer.y + y + 1, outer.width, outer.height.saturating_sub(y + 1));
     let charts: Vec<Metric> = [Metric::Temperature, Metric::Humidity, Metric::HeatDemand, Metric::Battery]
         .into_iter()
         .filter(|m| d.history.contains_key(m))
         .collect();
-    let timelines: Vec<Metric> = [Metric::On, Metric::Running]
+    let switches: Vec<Metric> = [Metric::On, Metric::Running]
         .into_iter()
         .filter(|m| d.history.contains_key(m))
         .collect();
-    if charts.is_empty() && timelines.is_empty() {
-        Line::styled("no history yet: values appear here as the device reports them", t.muted())
-            .render(row(body, 0), buf);
+    if charts.is_empty() && switches.is_empty() {
+        Line::styled(" no history yet: graphs appear as the device reports", t.muted())
+            .render(Rect::new(body.x, body.y, body.width, 1), buf);
         return;
     }
-    let timeline_h = 3 * timelines.len() as u16;
-    let chart_h = if charts.is_empty() {
-        0
-    } else {
-        body.height.saturating_sub(timeline_h) / charts.len() as u16
-    };
+    // On/off boxes are short; charts share what's left.
+    const SWITCH_H: u16 = 5;
+    let switch_total = SWITCH_H * switches.len() as u16;
+    let chart_h = if charts.is_empty() { 0 } else { body.height.saturating_sub(switch_total) / charts.len() as u16 };
     let mut y = body.y;
     for m in charts {
-        let area = Rect::new(body.x, y, body.width, chart_h);
-        section_title(app, i, m, row(area, 0), buf);
-        let chart = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(2));
-        graph_with_axes(app, i, m, chart, buf);
+        let r = Rect::new(body.x, y, body.width, chart_h);
+        metric_box(app, i, m, r, buf);
         y += chart_h;
     }
-    for m in timelines {
-        let area = Rect::new(body.x, y, body.width, 3);
-        section_title(app, i, m, row(area, 0), buf);
-        let colour = if m == Metric::Running { t.heat() } else { t.glow() };
-        timeline(app, d.history.get(&m), row(area, 1), buf, colour);
-        y += 3;
+    for m in switches {
+        let r = Rect::new(body.x, y, body.width, SWITCH_H.min(body.bottom().saturating_sub(y)));
+        metric_box(app, i, m, r, buf);
+        y += SWITCH_H;
     }
 }
 
-fn row(area: Rect, n: u16) -> Rect {
-    Rect::new(area.x, area.y + n, area.width, 1).intersection(area)
+fn metric_name(m: Metric) -> &'static str {
+    match m {
+        Metric::Temperature => "temperature",
+        Metric::Humidity => "humidity",
+        Metric::Battery => "battery",
+        Metric::HeatDemand => "heating demand",
+        Metric::On => "power",
+        Metric::Running => "heating",
+        _ => "",
+    }
 }
 
-fn section_title(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Buffer) {
+/// A metric's box: title, stats on the right, graph with scale and axis.
+fn metric_box(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Buffer) {
     let t = &app.theme;
+    if area.height < 3 {
+        return;
+    }
     let d = &app.devices[device];
-    let name = match m {
-        Metric::Temperature => "Temperature",
-        Metric::Humidity => "Humidity",
-        Metric::Battery => "Battery",
-        Metric::HeatDemand => "Heating demand",
-        Metric::On => "Power",
-        Metric::Running => "Running",
-        _ => "",
-    };
-    let mut spans = vec![Span::styled(name, t.bold(t.fg()))];
-    let fmt = |v: f64| match m {
-        Metric::Temperature => fmt_temp(app, v),
-        _ => format!("{v:.0}%"),
-    };
+    let mut right = vec![];
     match m {
         Metric::On | Metric::Running => {
-            let label = match (m, current(d, m)) {
-                (Metric::On, Some(v)) if v != 0.0 => "on",
-                (Metric::On, Some(_)) => "off",
-                (Metric::Running, Some(v)) if v as u64 & 1 != 0 => "heating",
-                (Metric::Running, Some(v)) if v as u64 & 2 != 0 => "cooling",
-                (Metric::Running, Some(_)) => "idle",
-                _ => "",
+            let now = current(d, m).unwrap_or(0.0) as u64;
+            let (text, colour) = match m {
+                Metric::On if now != 0 => ("on", super::glow(app)),
+                Metric::On => ("off", t.dim()),
+                _ if now & 1 != 0 => ("heating", super::flame(app)),
+                _ => ("idle", t.dim()),
             };
-            spans.push(Span::styled(format!("  {label}"), t.muted()));
-            if m == Metric::Running && d.info.as_ref().and_then(|i| i.thermostat).is_some_and(|th| th.running_estimated) {
-                spans.push(Span::styled(" · estimated from temperature vs setpoint", t.muted()));
+            if m == Metric::Running {
+                if d.info.as_ref().and_then(|i| i.thermostat).is_some_and(|th| th.running_estimated) {
+                    right.push(Span::styled("estimated  ", t.muted()));
+                }
+                if let Some(mode) = current(d, Metric::Mode) {
+                    right.push(Span::styled(format!("mode {}  ", system_mode(mode as u8)), t.muted()));
+                }
             }
-            if m == Metric::Running
-                && let Some(mode) = current(d, Metric::Mode)
-            {
-                spans.push(Span::styled(format!(" · mode {}", system_mode(mode as u8)), t.muted()));
-            }
+            right.push(Span::styled(text, t.bold(colour)));
         }
         _ => {
+            let fmt = |v: f64| match m {
+                Metric::Temperature => fmt_temp(app, v),
+                _ => format!("{v:.0}%"),
+            };
             if let Some(h) = d.history.get(&m)
                 && let Some(s) = series::stats(h, unix_minute(), app.range_minutes())
             {
-                spans.push(Span::styled(
-                    format!("  min {}  avg {}  max {}", fmt(s.min), fmt(s.avg), fmt(s.max)),
-                    t.muted(),
-                ));
+                for (label, v) in [("min ", s.min), ("  avg ", s.avg), ("  max ", s.max)] {
+                    right.push(Span::styled(label, t.muted()));
+                    right.push(Span::styled(fmt(v), t.bold(t.title())));
+                }
             }
         }
     }
-    Line::from(spans).render(area, buf);
+    let colour = t.dim();
+    let inner = btop_box(app, area, buf, colour, vec![Span::styled(metric_name(m), t.bold(t.title()))], right);
+    graph_with_axes(app, device, m, inner, buf);
 }
 
-/// A gradient graph with a scale gutter on the left and a time axis below.
+/// A braille graph with a scale gutter on the left and a time axis below.
 fn graph_with_axes(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Buffer) {
     const GUTTER: u16 = 8;
     let t = &app.theme;
     if area.height < 2 || area.width <= GUTTER {
         return;
     }
-    let plot = Rect::new(area.x + GUTTER, area.y, area.width - GUTTER, area.height - 1);
+    let plot = Rect::new(area.x + GUTTER, area.y, area.width - GUTTER - 1, area.height - 1);
     let overlay = (m == Metric::Temperature && app.devices[device].history.contains_key(&Metric::HeatSetpoint))
         .then_some(Metric::HeatSetpoint);
     super::metric_graph_bare(app, device, m, overlay, plot, buf);
 
-    // Scale: the graph's range, top and bottom, plus a midpoint if tall.
     if let Some((lo, hi)) = super::metric_range(app, device, m, overlay, plot.width) {
         let fmt = |v: f64| match m {
             Metric::Temperature => fmt_temp(app, v),
+            Metric::On | Metric::Running => (if v >= 0.5 { "on" } else { "off" }).to_string(),
             _ => format!("{v:.0}%"),
         };
         let label = |y: u16, v: f64, buf: &mut Buffer| {
-            Line::styled(format!("{} ┤", fmt(v)), Style::new().fg(t.dim()))
+            Line::styled(format!("{} ", fmt(v)), t.muted())
                 .alignment(Alignment::Right)
                 .render(Rect::new(area.x, y, GUTTER, 1), buf);
         };
         label(plot.y, hi, buf);
-        label(plot.bottom() - 1, lo, buf);
+        if plot.height > 1 {
+            label(plot.bottom() - 1, lo, buf);
+        }
         if plot.height >= 6 {
             label(plot.y + plot.height / 2, (hi + lo) / 2.0, buf);
         }
@@ -251,7 +242,7 @@ fn graph_with_axes(app: &App, device: usize, m: Metric, area: Rect, buf: &mut Bu
     // Time axis.
     let axis = Rect::new(plot.x, plot.bottom(), plot.width, 1);
     for x in axis.left()..axis.right() {
-        buf[(x, axis.y)].set_char(if t.ascii { '-' } else { '─' }).set_style(Style::new().fg(t.faint()));
+        buf[(x, axis.y)].set_char('─').set_style(Style::new().fg(t.faint()));
     }
     Line::styled(format!("-{} ", app.range_label()), t.muted()).render(axis, buf);
     Line::styled(" now", t.muted()).alignment(Alignment::Right).render(axis, buf);

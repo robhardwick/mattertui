@@ -1,9 +1,9 @@
 //! Colours, gradients and terminal capability fallback.
 //!
-//! One palette, tuned for a black terminal background: teal and blue for
-//! structure (frames, titles, labels, graph lows), orange and amber for data
-//! and emphasis (highlights, graph highs, lights on, heating). Red is only for
-//! errors and hot temperatures. The app never paints a background.
+//! Modelled on btop's default theme for a black terminal: each room box has
+//! its own colour (green, orange, magenta, red, …), labels and values are
+//! bold white, dividers and meter tracks are dark grey, and graphs and meters
+//! run green → yellow → red. The app never paints a background.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -13,43 +13,42 @@ type Rgb = (u8, u8, u8);
 pub struct Theme {
     /// 24-bit colour; otherwise a 16-colour palette.
     pub truecolor: bool,
-    /// Bare Linux console: ASCII icons and charts (no braille glyphs).
+    /// Bare Linux console: ASCII graphs (no braille glyphs).
     pub ascii: bool,
 }
 
-/// Room tints: subtle variations within the teal/blue family, assigned in
-/// declaration order unless a room names one.
+/// Room box colours, assigned in declaration order unless a room names one.
 pub const ACCENTS: &[(&str, Rgb, Color)] = &[
-    ("teal", (72, 178, 178), Color::Cyan),
-    ("steel", (96, 146, 196), Color::Blue),
-    ("sea", (78, 182, 146), Color::Green),
-    ("cyan", (86, 192, 222), Color::LightCyan),
-    ("slate", (122, 156, 178), Color::Gray),
-    ("jade", (64, 160, 124), Color::LightGreen),
-    ("aqua", (110, 206, 200), Color::Cyan),
+    ("green", (84, 178, 96), Color::Green),
+    ("orange", (204, 132, 52), Color::Yellow),
+    ("magenta", (186, 72, 186), Color::Magenta),
+    ("red", (196, 70, 70), Color::Red),
+    ("blue", (92, 100, 214), Color::Blue),
+    ("cyan", (52, 160, 170), Color::Cyan),
+    ("olive", (160, 156, 52), Color::LightYellow),
 ];
 
-/// Temperature: cold blue → teal → seafoam → amber → hot red-orange.
+/// Temperature: cold blue → teal → green → yellow → hot red.
 const TEMP_STOPS: &[(f64, Rgb, Color)] = &[
-    (14.0, (76, 128, 220), Color::Blue),
-    (17.0, (64, 186, 196), Color::Cyan),
-    (20.0, (146, 206, 170), Color::Green),
-    (23.0, (255, 176, 72), Color::Yellow),
-    (26.0, (255, 92, 64), Color::Red),
+    (14.0, (72, 151, 212), Color::Blue),
+    (17.0, (64, 200, 190), Color::Cyan),
+    (20.0, (80, 240, 149), Color::Green),
+    (23.0, (242, 226, 102), Color::Yellow),
+    (27.0, (250, 30, 30), Color::Red),
 ];
 
+/// Humidity: btop's "cached" blues.
 const HUMIDITY_STOPS: &[(f64, Rgb, Color)] = &[
-    (30.0, (112, 150, 166), Color::Gray),
-    (50.0, (84, 176, 210), Color::Cyan),
-    (70.0, (64, 128, 236), Color::Blue),
+    (30.0, (40, 110, 160), Color::Blue),
+    (50.0, (116, 230, 252), Color::Cyan),
+    (70.0, (38, 197, 255), Color::LightBlue),
 ];
 
-/// Generic graph gradient by height: teal near the baseline rising to orange.
+/// btop's cpu gradient, by height: green → yellow → red.
 const GRAPH_STOPS: &[(f64, Rgb, Color)] = &[
-    (0.0, (32, 96, 112), Color::Blue),
-    (0.45, (64, 176, 172), Color::Cyan),
-    (0.8, (246, 168, 76), Color::Yellow),
-    (1.0, (255, 112, 52), Color::LightRed),
+    (0.0, (80, 240, 149), Color::Green),
+    (0.5, (242, 226, 102), Color::Yellow),
+    (1.0, (250, 30, 30), Color::Red),
 ];
 
 impl Theme {
@@ -70,45 +69,49 @@ impl Theme {
         }
     }
 
-    // --- Structure (teal family) ---
+    // --- Structure ---
 
-    /// Box frames and rules.
+    /// Plain box frames (log, detail fallbacks) and rules.
     pub fn frame(&self) -> Color {
-        self.pick((44, 84, 96), Color::DarkGray)
+        self.pick((88, 88, 88), Color::DarkGray)
     }
-    /// Titles in frames.
+    /// Titles and labels: btop's bright white.
     pub fn title(&self) -> Color {
-        self.pick((132, 214, 214), Color::Cyan)
+        self.pick((238, 238, 238), Color::White)
     }
-    /// Labels and secondary text.
+    /// Secondary text.
     pub fn dim(&self) -> Color {
-        self.pick((112, 140, 150), Color::Gray)
+        self.pick((128, 128, 128), Color::Gray)
     }
-    /// Tracks, leaders and the faintest detail.
+    /// Dividers, leaders and meter tracks.
     pub fn faint(&self) -> Color {
-        self.pick((44, 62, 70), Color::DarkGray)
+        self.pick((64, 64, 64), Color::DarkGray)
     }
 
-    // --- Data (white values, orange emphasis) ---
+    // --- Data ---
 
     /// Plain values.
     pub fn fg(&self) -> Color {
-        self.pick((228, 232, 234), Color::White)
+        self.pick((204, 204, 204), Color::White)
     }
-    /// The highlight colour: selection, numbers to notice.
-    pub fn orange(&self) -> Color {
-        self.pick((255, 152, 56), Color::Yellow)
+    /// btop's highlight: hotkey letters and the selected row.
+    pub fn hi(&self) -> Color {
+        self.pick((225, 82, 82), Color::LightRed)
+    }
+    /// Background of the selected title, as btop's selected row.
+    pub fn selected_bg(&self) -> Color {
+        self.pick((106, 47, 47), Color::Red)
     }
     /// Warm light for lights that are on.
     pub fn glow(&self) -> Color {
-        self.pick((255, 176, 72), Color::Yellow)
+        self.pick((255, 200, 80), Color::Yellow)
     }
     /// Peak of the "breathing" glow.
     pub fn glow_bright(&self) -> Color {
-        self.pick((255, 226, 166), Color::LightYellow)
+        self.pick((255, 236, 170), Color::LightYellow)
     }
     pub fn heat(&self) -> Color {
-        self.pick((255, 116, 52), Color::LightRed)
+        self.pick((255, 110, 60), Color::LightRed)
     }
     pub fn cool(&self) -> Color {
         self.pick((92, 168, 240), Color::LightBlue)
@@ -117,13 +120,13 @@ impl Theme {
     // --- Status ---
 
     pub fn good(&self) -> Color {
-        self.pick((84, 204, 164), Color::Green)
+        self.pick((80, 240, 149), Color::Green)
     }
     pub fn warn(&self) -> Color {
-        self.pick((255, 192, 72), Color::Yellow)
+        self.pick((242, 226, 102), Color::Yellow)
     }
     pub fn bad(&self) -> Color {
-        self.pick((255, 88, 88), Color::Red)
+        self.pick((250, 64, 64), Color::Red)
     }
 
     // --- Styles ---
@@ -201,11 +204,11 @@ mod tests {
 
     #[test]
     fn gradient_clamps_and_interpolates() {
-        assert_eq!(TC.temperature(0.0), Color::Rgb(76, 128, 220));
-        assert_eq!(TC.temperature(40.0), Color::Rgb(255, 92, 64));
-        assert_eq!(TC.temperature(20.0), Color::Rgb(146, 206, 170));
-        assert_eq!(TC.graph(0.0), Color::Rgb(32, 96, 112));
-        assert_eq!(TC.graph(1.0), Color::Rgb(255, 112, 52));
+        assert_eq!(TC.temperature(0.0), Color::Rgb(72, 151, 212));
+        assert_eq!(TC.temperature(40.0), Color::Rgb(250, 30, 30));
+        assert_eq!(TC.temperature(20.0), Color::Rgb(80, 240, 149));
+        assert_eq!(TC.graph(0.0), Color::Rgb(80, 240, 149));
+        assert_eq!(TC.graph(1.0), Color::Rgb(250, 30, 30));
     }
 
     #[test]
@@ -216,7 +219,7 @@ mod tests {
         };
         assert_eq!(t.temperature(20.4), Color::Green);
         assert_eq!(t.temperature(22.8), Color::Yellow);
-        assert_eq!(t.accent(Some("steel"), 0), Color::Blue);
+        assert_eq!(t.accent(Some("magenta"), 0), Color::Magenta);
         assert_eq!(t.frame(), Color::DarkGray);
     }
 }
