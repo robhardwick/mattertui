@@ -7,8 +7,8 @@
 //! - Inside a room, every device is its own box; boxes stretch to fill the
 //!   room, so taller terminals mean taller graphs.
 //! - A **featured** device fills its room like btop's CPU box: its graph
-//!   takes the whole room and the other devices float over its top-right as
-//!   boxes at their natural height, like btop's per-core panel.
+//!   takes the whole room and the other devices float over its bottom-right
+//!   as boxes at their natural height, like btop's per-core panel.
 //! - If the minimum sizes don't fit, featured rooms fall back to plain boxes,
 //!   then devices become one-line rows inside their room box (like btop's
 //!   core list), and finally the caller scrolls.
@@ -102,7 +102,9 @@ pub fn min_height(kind: DeviceKind, variant: Variant) -> u16 {
 pub fn natural_height(kind: DeviceKind) -> u16 {
     match kind {
         DeviceKind::Plug => 2 + 2 + 1,
-        DeviceKind::TemperatureSensor | DeviceKind::LeakSensor => 2 + 3 + 2,
+        // A wet/dry history needs only one row.
+        DeviceKind::LeakSensor => 2 + 3 + 1,
+        DeviceKind::TemperatureSensor => 2 + 3 + 2,
         DeviceKind::Thermostat => 2 + 5 + 2,
     }
 }
@@ -156,16 +158,23 @@ impl Plan {
     }
 }
 
+/// Rooms that aren't wide stack this many to a column beside wide ones.
+const STACK_BESIDE_WIDE: usize = 2;
+
 fn plan(rooms: &[RoomSpec], area: Rect, density: Density) -> Plan {
-    let columns = (area.width / MIN_ROOM_WIDTH).clamp(1, rooms.len() as u16);
-    let mut cols: Vec<Vec<(usize, u16)>> = vec![Vec::new(); columns as usize];
-    let height = |c: &Vec<(usize, u16)>| c.iter().map(|(_, h)| h).sum::<u16>();
-    for (r, room) in rooms.iter().enumerate() {
-        // Shortest column, leftmost on ties.
-        let c = (0..columns as usize).min_by_key(|&c| (height(&cols[c]), c)).unwrap_or(0);
-        let (_, width) = span(area.x, area.width, columns, c as u16);
-        cols[c].push((r, room_min_height(room, width, density)));
-    }
+    let max_columns = (area.width / MIN_ROOM_WIDTH).clamp(1, rooms.len() as u16) as usize;
+    let (wide, narrow): (Vec<usize>, Vec<usize>) = (0..rooms.len()).partition(|&r| wants_width(&rooms[r], density));
+    let narrow_columns = narrow.len().div_ceil(STACK_BESIDE_WIDE);
+    let mut cols: Vec<Vec<(usize, u16)>> = if !wide.is_empty() && wide.len() + narrow_columns <= max_columns {
+        // Each wide room gets a column of its own; the rest stack beside
+        // them, two to a column, so they don't squeeze the wide ones.
+        let mut cols: Vec<_> = wide.iter().map(|&r| vec![(r, 0)]).collect();
+        cols.extend(pack(rooms, &narrow, narrow_columns, area, wide.len() + narrow_columns, density));
+        cols.sort_by_key(|c| c[0].0);
+        cols
+    } else {
+        pack(rooms, &(0..rooms.len()).collect::<Vec<_>>(), max_columns, area, max_columns, density)
+    };
     // Like btop's CPU box, a column holding a featured room (graph plus a
     // side column) gets double width.
     let weights: Vec<u16> = cols
@@ -180,6 +189,20 @@ fn plan(rooms: &[RoomSpec], area: Rect, density: Density) -> Plan {
         }
     }
     Plan { spans, cols }
+}
+
+/// Masonry: each room (in order) into the shortest of `n` columns, leftmost
+/// on ties, measured as if the area held `of` equal columns.
+fn pack(rooms: &[RoomSpec], which: &[usize], n: usize, area: Rect, of: usize, density: Density) -> Vec<Vec<(usize, u16)>> {
+    let mut cols: Vec<Vec<(usize, u16)>> = vec![Vec::new(); n];
+    let (_, width) = span(area.x, area.width, of as u16, 0);
+    let height = |c: &Vec<(usize, u16)>| c.iter().map(|(_, h)| h).sum::<u16>();
+    for &r in which {
+        let c = (0..n).min_by_key(|&c| (height(&cols[c]), c)).unwrap_or(0);
+        cols[c].push((r, room_min_height(&rooms[r], width, density)));
+    }
+    cols.retain(|c| !c.is_empty());
+    cols
 }
 
 fn wants_width(room: &RoomSpec, density: Density) -> bool {
@@ -351,7 +374,7 @@ fn place_room(room_idx: usize, room: &RoomSpec, rect: Rect, density: Density) ->
         }
         Shape::Featured { featured, side } => {
             // The graph spans the room; other devices float over it near the
-            // right, vertically centred, with graph showing on every side
+            // right, sitting at the bottom with graph showing on every side
             // (like btop's per-core box). Natural height, or minimum if tight.
             out.push(PlacedTile {
                 room: room_idx,
@@ -372,7 +395,7 @@ fn place_room(room_idx: usize, room: &RoomSpec, rect: Rect, density: Density) ->
                     .collect();
                 let total: u16 = heights.iter().sum();
                 let x = inner.right().saturating_sub(side_w + FLOAT_MARGIN_X);
-                let mut y = inner.y + inner.height.saturating_sub(total) / 2;
+                let mut y = inner.bottom().saturating_sub(total + FLOAT_MARGIN_Y).max(inner.y);
                 for (&i, &h) in side.iter().zip(&heights) {
                     out.push(PlacedTile {
                         room: room_idx,
@@ -496,8 +519,7 @@ mod tests {
         let top = others.iter().map(|t| t.rect.y).min().unwrap();
         let bottom = others.iter().map(|t| t.rect.bottom()).max().unwrap();
         assert!(top > featured.rect.y && bottom < featured.rect.bottom(), "graph above and below");
-        let (above, below) = (top - featured.rect.y, featured.rect.bottom() - bottom);
-        assert!(above.abs_diff(below) <= 1, "vertically centred: {above} above, {below} below");
+        assert_eq!(featured.rect.bottom() - bottom, FLOAT_MARGIN_Y, "bottom-aligned with padding");
         // Natural height, not stretched to fill the room.
         assert_eq!(others[0].rect.height, natural_height(Plug));
         assert_eq!(others[1].rect.height, natural_height(TemperatureSensor));
@@ -557,6 +579,28 @@ mod tests {
         assert!(featured.rect.width >= 40, "graph gets room: {}", featured.rect.width);
         assert_eq!(weighted_spans(0, 10, &[3, 2]), vec![(0, 6), (6, 4)]);
         assert_eq!(weighted_spans(0, 11, &[1, 1]), vec![(0, 6), (6, 5)]);
+    }
+
+    /// Two featured rooms with side devices take a column each; two featured
+    /// rooms on their own stack in a third.
+    #[test]
+    fn lone_featured_rooms_stack_beside_wide_ones() {
+        let rooms = [
+            room(&[(Thermostat, true), (Plug, false)]),
+            room(&[(Thermostat, true), (TemperatureSensor, false)]),
+            room(&[(TemperatureSensor, true)]),
+            room(&[(TemperatureSensor, true)]),
+        ];
+        let area = Rect::new(0, 0, 220, 50);
+        let l = layout(&rooms, area);
+        insta::assert_snapshot!(sketch(&l, area));
+        assert_sane(&l, area);
+        let rect = |r: usize| l.rooms[r].rect;
+        assert!(rect(0).right() <= rect(1).x, "first two side by side");
+        assert!(rect(1).right() <= rect(2).x, "third column to their right");
+        assert_eq!(rect(2).x, rect(3).x, "last two share a column");
+        assert_eq!(rect(2).bottom(), rect(3).y, "stacked");
+        assert_eq!(rect(3).bottom(), area.bottom());
     }
 
     #[test]

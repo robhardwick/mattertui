@@ -217,6 +217,13 @@ pub fn metric_graph_bare(app: &App, device: usize, metric: Metric, overlay: Opti
     let Some((lo, hi)) = metric_range(app, device, metric, overlay, area.width) else {
         return false;
     };
+    if metric.binary() {
+        // A faint baseline, so "off" or "dry" reads as a line, not a blank.
+        let y = area.bottom() - 1;
+        for x in area.left()..area.right() {
+            buf[(x, y)].set_char(if t.ascii { '.' } else { '⣀' }).set_style(Style::new().fg(t.faint()));
+        }
+    }
     let h = device_hue(app, device);
     let colour = |frac: f64| t.graph(h, frac);
     Graph {

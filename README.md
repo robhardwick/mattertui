@@ -1,5 +1,7 @@
 # mattertui
 
+![mattertui dashboard](docs/screenshot.png)
+
 > [!WARNING]
 > Vibe coded
 

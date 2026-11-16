@@ -308,6 +308,9 @@ fn dashboard(app: &mut App, body: Rect, buf: &mut Buffer) {
 }
 
 #[cfg(test)]
+mod screenshot;
+
+#[cfg(test)]
 mod tests_support {
     use super::*;
     use crate::state::{DeviceInfo, Metric, ThermostatInfo, Transport, unix_minute};
