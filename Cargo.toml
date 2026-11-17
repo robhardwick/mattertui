@@ -18,7 +18,6 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "
 toml = "1.2.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
-tui-big-text = "0.8.10"
 ureq = "3.5.2"
 
 [dev-dependencies]
